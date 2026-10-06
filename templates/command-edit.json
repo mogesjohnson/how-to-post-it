@@ -1,8 +1,7 @@
 {
   "op": "edit",
   "target": "page",
-  "date": "2026-10-05",
-  "pin": "AI agents",
+  "pin": "how-to-post-it test",
   "pageNumber": 1,
   "title": "Ideas from the drive (edited)",
   "body": "Corrected: agents = LLM + tools + memory + loop."

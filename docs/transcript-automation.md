@@ -73,7 +73,7 @@ and the recommendation in [§2.5](#25-recommendation).
 | **B. Grok Automation** ([announcement](https://x.ai/news/grok-automations)) | A scheduled Grok Automation is told: "find today's car conversations that aren't on the board yet, summarize them, push inbox files". | Runs inside your Grok account, nothing to host, Grok does the summary itself | **Unverified** whether an Automation can read your *other* conversations, and whether it has a GitHub connector that can write files. The announced schedules are once, daily, weekdays, weekly, monthly or yearly, so this is an **end-of-day sweep**, not silence detection |
 | **C1. REST reads with your grok.com session** | A small script on an always-on machine calls the same **undocumented, same-origin** JSON endpoints grok.com's own web page uses (list conversations, then load one conversation's messages), sending your grok.com session cookies. | Cheap and fast: one small JSON request per poll, so it can poll every few seconds. Exact timestamps from JSON, no page parsing | **Private, undocumented endpoints** that xAI can change or lock down anytime. A session cookie is **full access to your Grok account**. Anti-bot challenges, cookie expiry, and xAI's terms ([§2.3](#23-what-xais-terms-say)) are real risks |
 | **C2. Browser automation of grok.com** | A real browser (Playwright, Puppeteer, or a tool such as Reduck) with a **persistent profile** signed in as you opens grok.com, then reads the conversation list and transcript, either by calling the same endpoints from inside the page or by reading the rendered page. | Behaves like you using the site; the browser keeps its own cookies fresh; can still work when direct requests get challenged | Heavier and slower (seconds per read, hundreds of MB of memory). Breaks when the page layout changes (if it reads the DOM). Same account-access and terms risks as C1 |
-| **D. Ara posts it herself** | No reader at all: you say "post it" (or tell Ara in her instructions to post at the natural end of each conversation). | Already works (the second path), no extra moving parts, fully within the product | Not automatic if you forget. "Post at the end" is unreliable because Ara doesn't know when you are done, and asking her to post after every answer floods the board |
+| **D. Ara posts it herself** | No reader at all: you say "post it" (or tell Ara in her instructions to post at the natural end of each conversation). | No extra moving parts, fully within the product. **Untested:** assumes Ara can create files in GitHub | Not automatic if you forget. "Post at the end" is unreliable because Ara doesn't know when you are done, and asking her to post after every answer floods the board |
 
 ### 2.2 What the research found (verified vs reported)
 
@@ -164,12 +164,13 @@ keep GitHub only for applying inbox files.
   and a `READER=rest|browser` switch, so switching is a config change, not a rewrite. A health check
   ([§7](#7-failure-modes)) should **alert on auth failure, a challenge page, or a schema change** (e.g. expected
   fields missing) and can auto-fail over from `rest` to `browser`.
-- **Keep D (Ara's "post it") as the always-available manual path**, and **A (manual export)** for an occasional
+- **Keep D (Ara's "post it") as the manual path** once it's tested (it assumes Ara can write to GitHub), and **A (manual export)** for an occasional
   backfill. **B (Grok Automation)** only if it turns out it can read other conversations and write to GitHub.
 - **Honesty, unchanged:** the endpoints are undocumented and unsupported, whether *voice/car* conversations return
   transcript text through them is **unverified** (test it first -- setup step 4), and automated access of grok.com is
-  in tension with xAI's AUP ([§2.3](#23-what-xais-terms-say)). If you're not comfortable with the account risk, use
-  D + A only. **Don't** build on xAI's internal grok-build OAuth or borrow its tokens.
+  in tension with xAI's AUP ([§2.3](#23-what-xais-terms-say)). If you're not comfortable with the account risk, you're
+  left with A (manual export) and D (Ara's "post it"), and D is untested. **Don't** build on xAI's internal
+  grok-build OAuth or borrow its tokens.
 
 ## 3. The silence-detection loop
 
@@ -185,13 +186,15 @@ Keep one small record per conversation, in a local file or tiny database on the 
 | `lastLoadedModify` | the conversation's `modifyTime` the last time bodies were loaded, so unchanged conversations skip the costly load |
 | `firstSeenAt` | **local clock** time when that newest message was first noticed |
 | `lastPostedTs` | timestamp of the newest message that is already included in a pushed summary |
-| `pending` | `{file, lastTs, op}` for a pushed command whose result hasn't been read yet |
+| `pending` | `{file, lastTs, op, pushedAt}` for a pushed command whose result hasn't been read yet |
 | `board` | where the note landed: `{date, pinTitle, pageTitle, pageNumber}` taken from the result file |
 | `status` | `active`, `quiet`, `posting`, `posted`, `needs_attention`, or `opted_out` |
+| `retry` | starts at 0; a manual reset adds 1, so the retried command gets a new file name (`…-<op>-r1.json`) |
 
 If the state file is lost, rebuild `lastPostedTs` and `board` from `inbox/results/auto-<convKey>-*.json` on the
 `inbox` branch: the file names carry the last-message timestamp and the results carry `matched.pinTitle`,
-`pageNumber` and `date`. That makes the loop recoverable without any extra storage.
+`pageNumber` and `date`. That makes the loop recoverable without any extra storage. Message bodies aren't part of
+this record: the loop keeps the last loaded copy in memory only, and loads it again after a restart.
 
 ### 3.2 State machine
 
@@ -204,10 +207,11 @@ stateDiagram-v2
   Quiet --> OptedOut: you said "don't post this"
   Quiet --> Posting: summarize, push inbox file
   Posting --> Posted: result ok or skipped_duplicate
-  Posting --> NeedsAttention: error, error_invalid, skipped_ambiguous, or no result
+  Posting --> NeedsAttention: error_invalid or skipped_ambiguous
+  Posting --> Posting: error or no result yet (alert once, wait for a re-run)
   Posting --> Posting: edit got skipped_not_found, retry as add
   Posted --> Active: conversation continues later
-  NeedsAttention --> Posting: fixed and retried
+  NeedsAttention --> Active: newer message appears, or you reset it after a fix (bumps retry)
   Posted --> [*]
   OptedOut --> [*]
 ```
@@ -223,6 +227,11 @@ In words:
    `lastPostedTs`.
 5. **Conversation continues later**: back to Active. The next time it goes quiet, the automation sends an **edit**
    that replaces that page's text with a new summary of the whole conversation, instead of adding a second page.
+6. **Needs attention**: `error_invalid` or `skipped_ambiguous`. The automation alerts and leaves that conversation
+   alone until a newer message arrives or you reset it. A reset sets the status back to `quiet` and adds 1 to
+   `retry`, so the retried command gets a new file name instead of finding the old result again. An `error` is
+   different: it alerts once and keeps waiting for the same result file, which a re-run of the workflow rewrites.
+   If the command file disappears without a result (someone deleted it), the conversation also needs attention.
 
 ### 3.3 Timestamps, clocks and time zones
 
@@ -259,6 +268,8 @@ CONFIG
   repo = "mogesjohnson/post-it-board", branch = "inbox"
   optOutPhrases    = ["don't post this", "do not post", "off the record"]
 
+cache = {}                                                # conversation id -> loaded messages, in memory only
+
 loop forever:
   now = utc_now()                                         # NTP-synced clock
   try:
@@ -273,15 +284,17 @@ loop forever:
   for conv in convs:
     if not looks_like_car_conversation(conv): continue
     st = state.load(conv.id) or rebuild_from_results(hash10(conv.id))
-    if conv.modifyTime <= st.lastLoadedModify and not st.pending: continue   # nothing new: skip the costly load
-    any_active = true                                     # something changed -> poll fast next time
-    msgs = reader.getMessages(conv.id)                    # load bodies ONLY when the conversation changed
-    st.lastLoadedModify = conv.modifyTime
+    if st.pending: check_result(st); continue             # wait for the Action first (reads GitHub, not grok.com)
+    if conv.id not in cache or conv.modifyTime > st.lastLoadedModify:   # changed, or not loaded since start
+      cache[conv.id] = reader.getMessages(conv.id)        # the costly load, ONLY when the conversation changed
+      st.lastLoadedModify = conv.modifyTime
+      any_active = true                                   # something changed -> poll fast next time
+    msgs = cache[conv.id]                                 # unchanged: reuse the copy in memory, still check quiet
     if msgs is empty: continue
     last = msgs[-1]
 
-    if st.pending: check_result(st); continue             # wait for the Action first
     if last.ts <= st.lastPostedTs: continue               # nothing new since the last post
+    if st.status == "needs_attention" and last.ts == st.lastSeenTs: continue   # wait for a fix or a newer message
 
     if last.ts != st.lastSeenTs:                          # still changing -> Active
       st.lastSeenTs = last.ts; st.firstSeenAt = now; st.status = "active"
@@ -291,23 +304,28 @@ loop forever:
     if timestamps_are_coarse() or last.ts > now + 5s:     # skew or minute resolution
       quiet = now - st.firstSeenAt
     needed = thresholdSec if last.role == "assistant" else max(thresholdSec, userTurnGraceSec)
-    if quiet < needed: continue
+    if quiet < needed: any_active = true; continue        # not quiet yet: keep polling fast
 
     if any(user turn contains an optOutPhrase):
       st.status = "opted_out"; st.lastPostedTs = last.ts; state.save(st); continue
-    if ara_already_posted(conv, msgs, st):                # see section 6
+    todo = msgs[ara_post_point(msgs):]                    # only what came after Ara's "Posted." (section 6), else all
+    if not substantial(todo):                             # Ara already posted everything worth keeping
       st.lastPostedTs = last.ts; state.save(st); continue
 
-    s    = summarize(msgs)                                # {pin, title, body}
-    name = "auto-" + hash10(conv.id) + "-" + fmt_utc(last.ts, "YYYYMMDDTHHMMSSZ") + ".json"
+    s    = summarize(todo)                                # {pin, title, body}
     if st.board:
-      cmd = {op: "edit", target: "page", date: st.board.date,
-             pin: st.board.pinTitle, page: st.board.pageTitle, body: s.body}
+      cmd = {op: "edit", target: "page", date: st.board.date, pin: st.board.pinTitle, body: s.body}
+      if st.board.pageTitle: cmd.page = st.board.pageTitle          # exact title: safer, numbers can shift
+      else: cmd.pageNumber = st.board.pageNumber                    # the page has no title
     else:
       cmd = {op: "add", date: ny_date(msgs[0].ts), pin: s.pin, title: s.title, body: s.body}
+    # the op is part of the name, so a fresh add after a failed edit can't collide with it (section 4.3);
+    # st.retry (bumped by a manual reset) gives a retried command a new name, so the stale result isn't re-read
+    name = "auto-" + hash10(conv.id) + "-" + fmt_utc(last.ts, "YYYYMMDDTHHMMSSZ") + "-" + cmd.op
+           + (st.retry ? "-r" + st.retry : "") + ".json"
 
     push_if_absent(repo, branch, "inbox/" + name, json(cmd))   # see section 4.3
-    st.pending = {file: name, lastTs: last.ts, op: cmd.op}; st.status = "posting"
+    st.pending = {file: name, lastTs: last.ts, op: cmd.op, pushedAt: now}; st.status = "posting"
     state.save(st)
 
   sleep(any_active ? activePollSec : idlePollSec)
@@ -315,17 +333,27 @@ loop forever:
 check_result(st):
   r = get_file(repo, branch, "inbox/results/" + st.pending.file)   # 404 -> not processed yet
   if r is missing:
-    if pushed more than 10 min ago: alert_once("no result", st.pending.file)
-    return
+    if not exists(repo, branch, "inbox/" + st.pending.file):    # command gone too: deleted by hand, or processed
+      r = get_file(repo, branch, "inbox/results/" + st.pending.file)   #   between the two reads, so look once more
+      if r is missing:                                    # deleted without a result: a person has to look
+        st.status = "needs_attention"; alert("command removed without a result", st.pending.file)
+        st.pending = null; state.save(st); return
+    if r is missing:
+      if now - st.pending.pushedAt > 10 min: alert_once("no result", st.pending.file)
+      return
   switch r.status:
     "ok", "skipped_duplicate":
+      prev = st.board                                     # null on the first add
       st.board = {date: r.date, pinTitle: r.matched.pinTitle,
-                  pageTitle: (st.board ? st.board.pageTitle : r.input.title),
-                  pageNumber: r.pageNumber or st.board.pageNumber}
+                  pageTitle: prev ? prev.pageTitle         # dedup needs the same title too, so on a first add
+                           : (trim(r.input.title) or null),   # (ok or skipped_duplicate) this is the page's title
+                  pageNumber: r.pageNumber or (prev ? prev.pageNumber : null)}
       st.lastPostedTs = st.pending.lastTs; st.status = "posted"
     "skipped_not_found" when st.pending.op == "edit":    # page was deleted or renamed by hand
-      st.board = null                                     # next quiet period sends a fresh add
-    otherwise:                                            # error, error_invalid, skipped_ambiguous
+      st.board = null; st.status = "quiet"                # the next poll sends a fresh add (its name ends in -add)
+    "error":                                              # the Action kept the command file
+      alert_once("error", r.message); return              # keep pending: a workflow re-run rewrites this result
+    otherwise:                                            # error_invalid, skipped_ambiguous: a person has to look
       st.status = "needs_attention"; alert(r.status, r.message)
   st.pending = null; state.save(st)
 ```
@@ -342,11 +370,17 @@ check_result(st):
 - **Rules for the summary**
   - plain text, key points only, `\n` for line breaks;
   - leave out anything personal or sensitive: **the board and the repo are public**;
+  - the text also stays in the public repo's `inbox` branch history (command and result files), even after the note
+    is deleted from the board. Only a history rewrite of that branch removes it;
   - `pin` ≤ 200 characters, `title` ≤ 200, `body` ≤ 5000 (`post.mjs` rejects longer values with `error_invalid`).
 - **Page title:** make it unique and stable, e.g. `Drive 9:15 PM` (the conversation's start time in New York).
   Later edits find the page by this exact title.
-- **Pin:** reuse a topic from earlier the same day when it's the same subject. `add` matches pins loosely, so
-  "garage shelves" lands on "Garage Shelves".
+- **Pin:** when it's the same subject as a note from earlier the same day, reuse that pin's **exact** title (keep the
+  titles you've posted in state). `add` ignores case, spaces, accents and punctuation, so "garage shelves" lands on
+  "Garage Shelves". Typos are forgiven only narrowly: both titles need the same number of words, at most 2 words may
+  differ, each by a single missing, extra or swapped letter (never a changed one), and only in all-letter words with
+  5+ letters in both spellings that keep their first letter. So short different words like "Code" and "Node" become
+  separate pins, while a few real pairs like "Trail"/"Trial" can still merge: another reason to reuse exact titles.
 
 ### 4.2 Command JSON (exactly what `post.mjs` accepts)
 
@@ -354,7 +388,7 @@ Allowed fields: `op`, `date`, `pin`, `title`, `body`, `color`, `target`, `page`,
 Don't add other fields: `post.mjs` ignores them, so they'd only give a false sense that something is tracked.
 Keep the automation's bookkeeping in its own state.
 
-**First post of a conversation (`add`):** file `inbox/auto-3f9c2a71d0-20261006T011512Z.json`
+**First post of a conversation (`add`):** file `inbox/auto-3f9c2a71d0-20261006T011512Z-add.json`
 
 ```json
 {
@@ -366,7 +400,7 @@ Keep the automation's bookkeeping in its own state.
 }
 ```
 
-**The same conversation continued and went quiet again (`edit`):** file `inbox/auto-3f9c2a71d0-20261006T013840Z.json`
+**The same conversation continued and went quiet again (`edit`):** file `inbox/auto-3f9c2a71d0-20261006T013840Z-edit.json`
 
 ```json
 {
@@ -383,23 +417,29 @@ For the edit, `pin` must be the **exact** pin title from the first result (`matc
 have fuzzy-matched an existing pin with slightly different wording. `page` must be the exact page title, or use
 `pageNumber` instead (exactly one of the two). Page numbers can shift if earlier pages are deleted, so the title is safer.
 
-**Result files** appear at `inbox/results/<same name>.json` with `status`, `matched`, `message`, `pageNumber`
-and `date`. Full format: [post-it-board inbox/README.md](https://github.com/mogesjohnson/post-it-board/blob/inbox/inbox/README.md).
+**Result files** appear at `inbox/results/<same name>.json` with `status`, `op`, `input`, `matched`, `message` and
+`processedAt`, plus `date` (missing on `error` and `error_invalid`) and `pageNumber` (on `ok` and `skipped_duplicate`
+for adds, and on `ok` for page edits and deletes; never on pin edits or the other `skipped_*` results). Full format:
+[post-it-board inbox/README.md](https://github.com/mogesjohnson/post-it-board/blob/inbox/inbox/README.md).
 
 | status | what the automation does |
 |---|---|
 | `ok` | record `board` and `lastPostedTs` |
-| `skipped_duplicate` | same text already on that pin in the last 10 min: treat as posted |
-| `skipped_ambiguous` | the topic could match several pins: alert, then retry `add` with the exact title from `candidates` |
-| `skipped_not_found` | an edit found no page (you deleted or renamed it): forget `board`, post a fresh `add` |
+| `skipped_duplicate` | a page with the same title and text was added to that pin in the last 10 min: treat as posted. The result reports that page's `pageNumber` and `matched.pageId`, and its title is the one you sent (dedup needs the same title) |
+| `skipped_ambiguous` | the topic could match several pins (listed in `candidates`), or a pin rename clashes with another pin's title: alert. The automation can't choose; a person renames or merges pins on the board, then resets the conversation (which bumps `retry`) |
+| `skipped_not_found` | an edit found no page (you deleted or renamed it, or its pin): forget `board`; the next poll posts a fresh `add`, whose `-add` file name doesn't collide with the edit's |
 | `error_invalid` | bug in the command (too long, wrong field): alert; don't retry the same file |
-| `error` | auth, network or database failure in the Action: the command file is **kept**; re-run the workflow, then read the result again |
+| `error` | auth, network or database failure in the Action: the command file is **kept**. Alert once and keep `pending`, then re-run the workflow: the re-run rewrites the same result file, which the automation is still watching |
 
 ### 4.3 Naming and pushing
 
-- **Deterministic file name:** `inbox/auto-<convKey>-<last-message UTC YYYYMMDDTHHMMSSZ>.json`.
-  - The same conversation state always gives the same name, so a retry after a crash can't create a second command.
+- **Deterministic file name:** `inbox/auto-<convKey>-<last-message UTC YYYYMMDDTHHMMSSZ>-<op>.json`, where `<op>` is
+  `add` or `edit`. After a manual reset the name also ends in `-r<retry>` (e.g. `…-add-r1.json`).
+  - The same conversation state and op always give the same name, so a retry after a crash can't create a second
+    command.
   - A newer message gives a new name, so updates never overwrite an unprocessed earlier command.
+  - The op suffix keeps a fresh `add` (sent after an `edit` came back `skipped_not_found`) apart from that edit, so
+    *push if absent* doesn't mistake it for the already-processed edit.
   - The `auto-` prefix keeps these apart from Ara's `ara-…` files and test files.
   - `convKey` is a hash, so the public repo never shows raw Grok conversation IDs.
 - **Push if absent**, using the GitHub REST contents API (the same call as
@@ -417,8 +457,11 @@ and `date`. Full format: [post-it-board inbox/README.md](https://github.com/moge
   Store it in the runner's secret store (OS keychain, environment of a service account, or an Actions secret if
   the runner is a private workflow), never in a file in any repo.
   - Fine-grained tokens can't be limited to one branch, so this token could also push to `main` (the site code).
-    Optional hardening: a branch ruleset on post-it-board's `main` that blocks direct pushes, with a bypass for you
-    as admin.
+    The inbox workflow runs `main`'s `scripts/post.mjs` with the Supabase bot secrets, so a leaked token could rewrite
+    it to steal the bot password. **Protect `main` with a branch ruleset** that blocks direct pushes, with an admin
+    bypass set to *For pull requests only* (the token acts as you) and the enforcement status set to *Active*; see
+    [setup-checklist.md](setup-checklist.md) step 2. A Contents-write token can still merge an open pull request from
+    a post-it-board branch, so don't leave those open.
 
 ## 5. How it fits with the inbox workflow and its secrets
 
@@ -440,7 +483,7 @@ sequenceDiagram
     Note over R: newest message older than threshold?
   end
   R->>R: summarize whole conversation
-  R->>G: PUT inbox/auto-<convKey>-<ts>.json (fine-grained token)
+  R->>G: PUT inbox/auto-<convKey>-<ts>-<op>.json (fine-grained token)
   G->>W: push to inbox triggers workflow
   W->>S: post.mjs --command-file, signed in as the bot account
   W->>G: inbox/results/<same name>.json, command file removed
@@ -455,10 +498,13 @@ sequenceDiagram
   `SUPABASE_OWNER_EMAIL` and `SUPABASE_OWNER_PASSWORD`. Runs are serialized by a concurrency group, so commands
   from Ara and the automation never race each other in the database.
 - **The automation never holds Supabase credentials.** It only holds the GitHub token, plus whatever the reader
-  needs (for C1 a grok.com session cookie, for C2 a signed-in browser profile -- either one is full Grok account access). Only the Action can sign in to Supabase, and RLS only lets
+  needs (for C1 a grok.com session cookie, for C2 a signed-in browser profile -- either one is full Grok account access). Only the Action signs in to Supabase, and RLS only lets
   accounts listed in `public.board_owners` write. The anon key stays read-only by design, and no `service_role`
-  key is used anywhere.
-- Results are public (the repo is public), but they contain only note text that the board shows publicly anyway.
+  key is used anywhere. Any code the workflow runs (`main`'s `scripts/post.mjs`) can read the bot secrets, which is
+  why `main` needs protecting ([§4.3](#43-naming-and-pushing)).
+- Command and result files are public (the repo is public). They hold the note text, including text that never
+  reaches the board or doesn't stay there (skipped, invalid, later edited or deleted notes), and it stays in the
+  `inbox` branch's history. Write every summary as if it were public for good.
 
 ## 6. Idempotency and dedup
 
@@ -466,20 +512,20 @@ Layers, from strongest to weakest:
 
 1. **Per-conversation state:** `lastPostedTs`. A conversation is summarized only when its newest message is newer
    than what was last posted, and only after the threshold of quiet time.
-2. **Deterministic file names:** one name per (conversation, last message). Re-runs, crashes and overlapping polls
+2. **Deterministic file names:** one name per (conversation, last message, op). Re-runs, crashes and overlapping polls
    produce the same name, and *push if absent* refuses to send it twice.
 3. **Edit instead of add for continued conversations:** after the first `ok`, later summaries of the same
    conversation are `edit` commands on the same page (exact `pin` + `page`, `target: "page"`), so a drive ends up as
    **one page** that gets updated, not a stack of near-copies.
-4. **`skipped_duplicate` in `post.mjs`:** an `add` whose body is identical to a page added to that pin in the
-   last 10 minutes is skipped. This is only a backstop: a summarizer seldom produces the exact same text twice.
+4. **`skipped_duplicate` in `post.mjs`:** an `add` whose title and text are identical to a page added to that pin in
+   the last 10 minutes is skipped. This is only a backstop: a summarizer seldom produces the exact same text twice.
 5. **One runner at a time:** take a lock (lock file, or a `concurrency` group if the runner is a workflow) so two
    copies of the loop never handle the same conversation at once.
 
-**Ara's "post it" and the automation.** If you say "post it" during a conversation, Ara pushes
-`inbox/ara-<YYYYMMDDTHHMMSS>-<slug>.json` ([ara-instructions.md](ara-instructions.md)). The automation would then also
+**Ara's "post it" and the automation.** If you say "post it" during a conversation, Ara is meant to push
+`inbox/ara-<YYYYMMDDTHHMMSS>-<slug>.json` ([ara-instructions.md](ara-instructions.md); untested). The automation would then also
 summarize the same conversation, with different text, so `skipped_duplicate` won't catch it. Pick one rule and
-implement it in `ara_already_posted()`:
+implement it in `ara_post_point()`, which returns where the unposted part of the conversation starts:
 
 - **Simple (recommended):** if the transcript contains you saying "post it" and Ara confirming ("Posted."), treat
   everything up to that point as posted. Only summarize what comes *after* it, if anything substantial.
@@ -498,9 +544,9 @@ implement it in `ara_already_posted()`:
 | **Auth expiry** (grok.com cookie/profile expired, 2FA prompt, GitHub token expired or revoked) | Read fails / `401`/`403`; for C1 the cookie needs re-extracting, for C2 the profile needs re-login | Alert ("sign in to Grok again" / "renew token"). Keep unposted state; nothing is lost while it waits. The signed-in **browser profile (C2) renews cookies on its own**, so it needs manual re-login less often than raw cookies (C1). Calendar reminder before the GitHub token expires |
 | **Rate limits** (grok.com limits undocumented and may be enforced "at our sole discretion"; GitHub REST: ~5,000 requests/hour per token plus secondary write limits) | `429`/`403` with retry headers | Poll gently (list cheaply only while active, back off when idle), never run parallel reads, honour `Retry-After`. One inbox push per finished conversation is far below GitHub's limits |
 | **GitHub push failure** (network, 409/422 because the Action pushed at the same moment) | PUT fails | Retry *push if absent* with backoff. The name is deterministic, so retries can't duplicate |
-| **Action failure** (`error` in `inbox/results/<name>.json`, or a red run in the post-it-board Actions tab) | Result `error`, or no result at all after ~10 min | The workflow **keeps** the command file on `error`. Fix the cause (e.g. bot password rotated without updating the secret) and re-run the workflow (it has `workflow_dispatch`). The automation alerts if no result appears |
+| **Action failure** (`error` in `inbox/results/<name>.json`, or a red run in the post-it-board Actions tab) | Result `error`, or no result at all after ~10 min | The workflow **keeps** the command file on `error`. Fix the cause (e.g. bot password rotated without updating the secret) and re-run the workflow (it has `workflow_dispatch`). The automation alerts once and keeps waiting on the same result file, which the re-run rewrites; it also alerts if no result appears |
 | **Bad command** (`error_invalid`) | Result `error_invalid` | A bug in the automation (usually length limits). Alert; don't retry the same file |
-| **Wrong topic / ambiguous** (`skipped_ambiguous`) | Result lists `candidates` | Retry with the exact pin title, or leave it for you to fix by hand |
+| **Wrong topic / ambiguous** (`skipped_ambiguous`) | Result lists `candidates` (or a rename clashed) | Alert. The automation can't choose between candidates: rename or merge the pins on the board by hand, then reset the conversation (which bumps `retry`) |
 | **Duplicate summaries** | Two pages for one drive | Usually Ara's "post it" plus the automation, or lost state: see [§6](#6-idempotency-and-dedup). Delete the extra page on the board |
 | **Not a car conversation** | Phone or web chats get posted | Filter with `looks_like_car_conversation()` (marker, time window, or only conversations you started while driving). Use the opt-out phrase for anything private |
 
@@ -532,7 +578,7 @@ recovers. See [§2.5](#25-recommendation).
 - **After the first real drives:** tune the threshold (5–30 s, start at 8) and the "your turn" grace period.
 - **Ongoing:** sign the reader in again when its session expires (re-extract the cookie for C1, re-login the browser profile for C2), renew the GitHub token before it
   expires, glance at the board and fix or delete a bad note, and act on alerts.
-- **When you want it pinned right now:** say "post it" to Ara, as before.
+- **When you want it pinned right now:** say "post it" to Ara (untested so far, see [ara-instructions.md](ara-instructions.md)).
 - **When something is private:** say "don't post this" (or your chosen opt-out phrase) in the car.
 
 ## How this replaces the phone-app design
@@ -554,7 +600,7 @@ Android app built with Google AI Studio that ran its **own** Ara session over xA
 | Dead zones | Local queue + retries on the phone | Don't matter: the transcript syncs later |
 | Battery / OEM app killers | Real risk | Not on the phone |
 | Biggest unknown | AI Studio Android build, audio routing in the Tesla | **How to read the Grok transcript** (no known public API) |
-| "Post it" by voice | In the app | Ara pushes the file directly, as before |
+| "Post it" by voice | In the app | Ara pushes the file directly (untested) |
 
 The legacy docs stay in the repo in case the transcript can't be read reliably and you want exact, real-time
 silence detection after all.

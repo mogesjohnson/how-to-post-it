@@ -29,9 +29,14 @@ post-it-board → Settings → Secrets and variables → Actions.
 5. Put the token straight into the secret store of whatever runs the automation (OS keychain, a service's
    environment, or an Actions secret in a **private** repo). Don't paste it into notes, chats, or any repo.
 
-If the token leaks, revoke it on the same page. The worst it can do is push to post-it-board (post or delete notes
-through the inbox, or change the site on `main`). Optional hardening: a branch ruleset on post-it-board's `main`
-that blocks direct pushes, with a bypass for you.
+If the token leaks, revoke it on the same page. It can push to post-it-board: post or delete notes through the inbox,
+change the site on `main`, or change `main`'s `scripts/post.mjs`, which the inbox workflow runs with the Supabase bot
+secrets, so it could steal the bot password. **Protect `main` with a ruleset (recommended, not optional):**
+post-it-board → **Settings → Rules → Rulesets → New branch ruleset**, target the default branch, turn on
+*Require a pull request before merging* and *Block force pushes*, add **Repository admin** to the bypass list with
+the mode **For pull requests only**, and set **Enforcement status** to **Active** (new rulesets start as *Disabled*).
+The token acts as you, so a bypass set to *Always allow* would let it push to `main` too. A Contents-write token can
+still merge an open pull request from a post-it-board branch, so don't leave those open.
 
 ## 3. Check what the transcript looks like on your phone
 
@@ -55,7 +60,8 @@ third-party tools with your session cookies. Evaluate the options in [transcript
 **Recommended (from [§2.5](transcript-automation.md#25-recommendation)):** primary = **C1, REST reads with your
 grok.com session**, on an always-on machine you control; fallback = **C2, browser automation with a persistent
 signed-in profile**. Keep both behind one `READER=rest|browser` flag. First, **read xAI's terms**
-([§2.3](transcript-automation.md#23-what-xais-terms-say)) and decide if you accept the account risk; if not, use D + A only.
+([§2.3](transcript-automation.md#23-what-xais-terms-say)) and decide if you accept the account risk; if not, you're left with
+A (manual export) and D (Ara, untested).
 
 - [ ] **Test the key unknown first:** confirm a **car** conversation's **text** is actually readable (not just title +
       timestamps). One archiver reports voice conversations expose only metadata. If car transcripts aren't readable,
@@ -70,7 +76,7 @@ signed-in profile**. Keep both behind one `READER=rest|browser` flag. First, **r
       the manual account-data ZIP (good only for a manual backfill).
 - [ ] **B. Grok Automation:** test whether a scheduled Automation can list your other conversations and push a file to
       GitHub; if so, use it as a daily catch-up.
-- [ ] **D. Ara posts it:** works today with no reader (step 6).
+- [ ] **D. Ara posts it:** needs no reader, but is untested (step 6).
 
 Then:
 
@@ -86,8 +92,10 @@ Then:
 
 1. From a computer with `gh` signed in: `scripts/send-test-command.sh`. It pushes a clearly named test note and
    prints the result. **This writes to the live board.**
-2. Delete the test pin: copy `templates/command-delete.json` to a scratch file, set `pin` to `how-to-post-it test`
-   and `date` to today, then run `scripts/send-test-command.sh <that file>`.
+2. Delete the test pin: run `scripts/send-test-command.sh templates/command-delete.json`. The template targets the pin
+   `how-to-post-it test` and has no `date`, so it hits today in New York, the same day as the test note (copy it and
+   add `"date"` only if the note is on another day). All three templates use that test pin, so running them as-is
+   never touches a real note.
 3. Turn off dry-run in the automation, have a short test conversation in the car, and confirm one `auto-…` page shows
    up. Keep talking in a later session of the same conversation and confirm the **same page is edited**, not a
    second one added.
@@ -96,6 +104,10 @@ Then:
 
 Paste [ara-instructions.md](ara-instructions.md) into Ara's custom instructions, or tell her once. Say "post it" on a
 test drive and check that `inbox/results/ara-….json` shows `ok`.
+
+- [ ] **Confirm Ara can write to GitHub at all.** This path is untested: it assumes the in-car Grok has a tool that
+      can create a file in a GitHub repo, which hasn't been verified, and no `ara-…` result has appeared in the inbox
+      yet. If she can't, the transcript automation is the only automatic path.
 
 ## 7. Tune the silence threshold after real drives
 
