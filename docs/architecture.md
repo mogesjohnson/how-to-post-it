@@ -122,7 +122,7 @@ Full spec: **[transcript-automation.md](transcript-automation.md)**.
   message is yours, wait longer (Ara may still answer).
 - **Clock handling:** all timestamps converted to UTC; local-only times read as America/New_York; if timestamps are
   coarse or in the future (skew), quiet time is measured by the runner's own clock since the message was first seen.
-- **File names:** `inbox/auto-<sha256(conversationId)[:10]>-<last-message UTC YYYYMMDDTHHMMSSZ>.json`, pushed only if
+- **File names:** `inbox/auto-<sha256(conversationId)[:10]>-<last-message UTC YYYYMMDDTHHMMSSZ>-<add|edit>.json`, pushed only if
   neither the command nor its result exists yet.
 - **Continuations:** after the first `ok`, later summaries of the same conversation are `edit` commands on the same
   page (exact `pin` from `matched.pinTitle`, exact `page` title, `target: "page"`).

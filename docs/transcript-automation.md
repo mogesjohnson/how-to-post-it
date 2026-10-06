@@ -186,9 +186,10 @@ Keep one small record per conversation, in a local file or tiny database on the 
 | `lastLoadedModify` | the conversation's `modifyTime` the last time bodies were loaded, so unchanged conversations skip the costly load |
 | `firstSeenAt` | **local clock** time when that newest message was first noticed |
 | `lastPostedTs` | timestamp of the newest message that is already included in a pushed summary |
-| `pending` | `{file, lastTs, op}` for a pushed command whose result hasn't been read yet |
+| `pending` | `{file, lastTs, op, pushedAt}` for a pushed command whose result hasn't been read yet |
 | `board` | where the note landed: `{date, pinTitle, pageTitle, pageNumber}` taken from the result file |
 | `status` | `active`, `quiet`, `posting`, `posted`, `needs_attention`, or `opted_out` |
+| `retry` | starts at 0; a manual reset adds 1, so the retried command gets a new file name (`…-<op>-r1.json`) |
 
 If the state file is lost, rebuild `lastPostedTs` and `board` from `inbox/results/auto-<convKey>-*.json` on the
 `inbox` branch: the file names carry the last-message timestamp and the results carry `matched.pinTitle`,
@@ -210,7 +211,7 @@ stateDiagram-v2
   Posting --> Posting: error or no result yet (alert once, wait for a re-run)
   Posting --> Posting: edit got skipped_not_found, retry as add
   Posted --> Active: conversation continues later
-  NeedsAttention --> Active: newer message appears, or you reset it after a fix
+  NeedsAttention --> Active: newer message appears, or you reset it after a fix (bumps retry)
   Posted --> [*]
   OptedOut --> [*]
 ```
@@ -227,8 +228,10 @@ In words:
 5. **Conversation continues later**: back to Active. The next time it goes quiet, the automation sends an **edit**
    that replaces that page's text with a new summary of the whole conversation, instead of adding a second page.
 6. **Needs attention**: `error_invalid` or `skipped_ambiguous`. The automation alerts and leaves that conversation
-   alone until a newer message arrives or you reset its status. An `error` is different: it alerts once and keeps
-   waiting for the same result file, which a re-run of the workflow rewrites.
+   alone until a newer message arrives or you reset it. A reset sets the status back to `quiet` and adds 1 to
+   `retry`, so the retried command gets a new file name instead of finding the old result again. An `error` is
+   different: it alerts once and keeps waiting for the same result file, which a re-run of the workflow rewrites.
+   If the command file disappears without a result (someone deleted it), the conversation also needs attention.
 
 ### 3.3 Timestamps, clocks and time zones
 
@@ -305,21 +308,24 @@ loop forever:
 
     if any(user turn contains an optOutPhrase):
       st.status = "opted_out"; st.lastPostedTs = last.ts; state.save(st); continue
-    if ara_already_posted(conv, msgs, st):                # see section 6
+    todo = msgs[ara_post_point(msgs):]                    # only what came after Ara's "Posted." (section 6), else all
+    if not substantial(todo):                             # Ara already posted everything worth keeping
       st.lastPostedTs = last.ts; state.save(st); continue
 
-    s    = summarize(msgs)                                # {pin, title, body}
+    s    = summarize(todo)                                # {pin, title, body}
     if st.board:
       cmd = {op: "edit", target: "page", date: st.board.date, pin: st.board.pinTitle, body: s.body}
       if st.board.pageTitle: cmd.page = st.board.pageTitle          # exact title: safer, numbers can shift
       else: cmd.pageNumber = st.board.pageNumber                    # the page has no title
     else:
       cmd = {op: "add", date: ny_date(msgs[0].ts), pin: s.pin, title: s.title, body: s.body}
-    # the op is part of the name, so a fresh add after a failed edit can't collide with it (section 4.3)
-    name = "auto-" + hash10(conv.id) + "-" + fmt_utc(last.ts, "YYYYMMDDTHHMMSSZ") + "-" + cmd.op + ".json"
+    # the op is part of the name, so a fresh add after a failed edit can't collide with it (section 4.3);
+    # st.retry (bumped by a manual reset) gives a retried command a new name, so the stale result isn't re-read
+    name = "auto-" + hash10(conv.id) + "-" + fmt_utc(last.ts, "YYYYMMDDTHHMMSSZ") + "-" + cmd.op
+           + (st.retry ? "-r" + st.retry : "") + ".json"
 
     push_if_absent(repo, branch, "inbox/" + name, json(cmd))   # see section 4.3
-    st.pending = {file: name, lastTs: last.ts, op: cmd.op}; st.status = "posting"
+    st.pending = {file: name, lastTs: last.ts, op: cmd.op, pushedAt: now}; st.status = "posting"
     state.save(st)
 
   sleep(any_active ? activePollSec : idlePollSec)
@@ -327,8 +333,14 @@ loop forever:
 check_result(st):
   r = get_file(repo, branch, "inbox/results/" + st.pending.file)   # 404 -> not processed yet
   if r is missing:
-    if pushed more than 10 min ago: alert_once("no result", st.pending.file)
-    return
+    if not exists(repo, branch, "inbox/" + st.pending.file):    # command gone too: deleted by hand, or processed
+      r = get_file(repo, branch, "inbox/results/" + st.pending.file)   #   between the two reads, so look once more
+      if r is missing:                                    # deleted without a result: a person has to look
+        st.status = "needs_attention"; alert("command removed without a result", st.pending.file)
+        st.pending = null; state.save(st); return
+    if r is missing:
+      if now - st.pending.pushedAt > 10 min: alert_once("no result", st.pending.file)
+      return
   switch r.status:
     "ok", "skipped_duplicate":
       prev = st.board                                     # null on the first add
@@ -414,7 +426,7 @@ for adds, and on `ok` for page edits and deletes; never on pin edits or the othe
 |---|---|
 | `ok` | record `board` and `lastPostedTs` |
 | `skipped_duplicate` | a page with the same title and text was added to that pin in the last 10 min: treat as posted. The result reports that page's `pageNumber` and `matched.pageId`, and its title is the one you sent (dedup needs the same title) |
-| `skipped_ambiguous` | the topic could match several pins (listed in `candidates`), or a pin rename clashes with another pin's title: alert. The automation can't choose; a person renames or merges pins on the board, then resets the conversation's status |
+| `skipped_ambiguous` | the topic could match several pins (listed in `candidates`), or a pin rename clashes with another pin's title: alert. The automation can't choose; a person renames or merges pins on the board, then resets the conversation (which bumps `retry`) |
 | `skipped_not_found` | an edit found no page (you deleted or renamed it, or its pin): forget `board`; the next poll posts a fresh `add`, whose `-add` file name doesn't collide with the edit's |
 | `error_invalid` | bug in the command (too long, wrong field): alert; don't retry the same file |
 | `error` | auth, network or database failure in the Action: the command file is **kept**. Alert once and keep `pending`, then re-run the workflow: the re-run rewrites the same result file, which the automation is still watching |
@@ -422,7 +434,7 @@ for adds, and on `ok` for page edits and deletes; never on pin edits or the othe
 ### 4.3 Naming and pushing
 
 - **Deterministic file name:** `inbox/auto-<convKey>-<last-message UTC YYYYMMDDTHHMMSSZ>-<op>.json`, where `<op>` is
-  `add` or `edit`.
+  `add` or `edit`. After a manual reset the name also ends in `-r<retry>` (e.g. `…-add-r1.json`).
   - The same conversation state and op always give the same name, so a retry after a crash can't create a second
     command.
   - A newer message gives a new name, so updates never overwrite an unprocessed earlier command.
@@ -513,7 +525,7 @@ Layers, from strongest to weakest:
 **Ara's "post it" and the automation.** If you say "post it" during a conversation, Ara is meant to push
 `inbox/ara-<YYYYMMDDTHHMMSS>-<slug>.json` ([ara-instructions.md](ara-instructions.md); untested). The automation would then also
 summarize the same conversation, with different text, so `skipped_duplicate` won't catch it. Pick one rule and
-implement it in `ara_already_posted()`:
+implement it in `ara_post_point()`, which returns where the unposted part of the conversation starts:
 
 - **Simple (recommended):** if the transcript contains you saying "post it" and Ara confirming ("Posted."), treat
   everything up to that point as posted. Only summarize what comes *after* it, if anything substantial.
@@ -534,7 +546,7 @@ implement it in `ara_already_posted()`:
 | **GitHub push failure** (network, 409/422 because the Action pushed at the same moment) | PUT fails | Retry *push if absent* with backoff. The name is deterministic, so retries can't duplicate |
 | **Action failure** (`error` in `inbox/results/<name>.json`, or a red run in the post-it-board Actions tab) | Result `error`, or no result at all after ~10 min | The workflow **keeps** the command file on `error`. Fix the cause (e.g. bot password rotated without updating the secret) and re-run the workflow (it has `workflow_dispatch`). The automation alerts once and keeps waiting on the same result file, which the re-run rewrites; it also alerts if no result appears |
 | **Bad command** (`error_invalid`) | Result `error_invalid` | A bug in the automation (usually length limits). Alert; don't retry the same file |
-| **Wrong topic / ambiguous** (`skipped_ambiguous`) | Result lists `candidates` (or a rename clashed) | Alert. The automation can't choose between candidates: rename or merge the pins on the board by hand, then reset the conversation's status |
+| **Wrong topic / ambiguous** (`skipped_ambiguous`) | Result lists `candidates` (or a rename clashed) | Alert. The automation can't choose between candidates: rename or merge the pins on the board by hand, then reset the conversation (which bumps `retry`) |
 | **Duplicate summaries** | Two pages for one drive | Usually Ara's "post it" plus the automation, or lost state: see [§6](#6-idempotency-and-dedup). Delete the extra page on the board |
 | **Not a car conversation** | Phone or web chats get posted | Filter with `looks_like_car_conversation()` (marker, time window, or only conversations you started while driving). Use the opt-out phrase for anything private |
 
