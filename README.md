@@ -15,7 +15,7 @@ This is a **documentation and spec repo**. It has no app code and no secrets.
 | [docs/architecture.md](docs/architecture.md) | Diagrams of all write paths, who does what, failure modes |
 | [docs/setup-checklist.md](docs/setup-checklist.md) | The steps you do by hand |
 | [docs/risks.md](docs/risks.md) | Honest risks and the list of unverified assumptions |
-| [templates/](templates/) | Example command files (add / edit / delete) |
+| [templates/](templates/) | Example command files (add / edit / delete), all for the test pin `how-to-post-it test` |
 | [scripts/send-test-command.sh](scripts/send-test-command.sh) | Pushes a test command into the board's inbox with `gh` |
 | [docs/ai-studio-prompt.md](docs/ai-studio-prompt.md) | *Superseded, optional legacy:* prompt for the old Android voice app |
 
@@ -66,24 +66,27 @@ Command format in brief:
 | status | meaning |
 |--------|---------|
 | `ok` | done |
-| `skipped_duplicate` | the same text was already added to that pin in the last 10 minutes |
-| `skipped_ambiguous` | more than one pin or page could match, so nothing changed |
+| `skipped_duplicate` | a page with the same title and text was already added to that pin in the last 10 minutes |
+| `skipped_ambiguous` | more than one pin or page could match, or a pin rename clashes with another pin's title, so nothing changed |
 | `skipped_not_found` | the pin, page or day doesn't exist (edit/delete need exact names) |
 | `error_invalid` | bad JSON or bad fields |
 | `error` | real failure (auth, network, database); the command file is kept for a retry |
 
-**add** ignores case, spaces and punctuation, so "AI" and "ai!" land on the same pin, and a whole-word prefix
-matches ("Python lists" → "Python"). Typos are tolerated only inside longer words (5+ letters, same first letter),
-so short different words like "Code" and "Node" stay separate pins. Writers should reuse the **exact** topic title
-from earlier the same day instead of relying on matching. **edit/delete** need the exact pin title plus a `target`,
-and never guess.
+**add** ignores case, spaces, accents and punctuation, so "AI" and "ai!" land on the same pin. A whole-word prefix
+matches when the shorter title has 4+ letters or digits ("Python lists" → "Python"). Typos are forgiven only
+narrowly: same number of words, at most 2 words differ, each by one missing, extra or swapped letter (never a changed
+one), in all-letter words with 5+ letters in both spellings that keep their first letter. So "Zebar" finds "Zebra",
+but "Code"/"Node" and "Cars"/"Cats" stay separate pins. A few real pairs like "Trail"/"Trial" can still merge, so
+writers should reuse the **exact** topic title from earlier the same day. Titles with no letters or digits (e.g. "🚗")
+must match exactly. **edit/delete** need the exact pin title plus a `target`, and never guess.
 
 ## Why the board repo stays public
 
 - **No secrets live in the repo.** Not in post-it-board, not here. The only key in the site code is the anon key,
   which is public by design.
-- **Actions secrets are encrypted.** They are never shown in logs (GitHub masks them) and are only
-  available to workflows in that repo.
+- **Actions secrets are encrypted.** GitHub masks them in logs (best effort: a transformed value can slip through),
+  and only workflows in that repo get them. Any code those workflows run can read them, including `main`'s
+  `scripts/post.mjs`, which is why `main` should be protected (see [Secrets model](#secrets-model)).
 - **Forks can't get the secrets.** Workflows triggered by pull requests from forks don't receive repository secrets, and the
   inbox workflow only runs on pushes to `inbox`, which needs write access.
 - **RLS blocks anonymous writes.** The anon key is read-only by design. Writes need a signed-in account listed in
@@ -91,10 +94,11 @@ and never guess.
 - **Never use a `service_role` key.** It bypasses RLS. The inbox signs in as the bot account instead, so RLS
   still applies to every write.
 - **GitHub Pages on a private repo needs a paid plan.** Keeping the repo public keeps the board free.
-- **The notes are public anyway.** Command and result files are readable in the repo, but they only contain note text,
-  which the board shows publicly. **That text also stays in the `inbox` branch's git history:** deleting a note from
-  the board doesn't remove it from the repo. Only a history rewrite of the `inbox` branch does, so keep summaries free
-  of anything sensitive.
+- **The notes are public anyway, and so is everything sent to the inbox.** Command and result files are readable in
+  the repo and hold the note text, including text that never reaches the board or doesn't stay there (skipped,
+  invalid, later edited or deleted notes). **That text stays in the `inbox` branch's git history:** deleting a note
+  from the board doesn't remove it from the repo. Only a history rewrite of the `inbox` branch does, so keep summaries
+  free of anything sensitive.
 
 ## Ways to post
 
@@ -106,15 +110,16 @@ automation or script (not Ara herself):
 1. periodically reads the conversation transcript;
 2. notices when the newest message is older than the **silence threshold** (default **8 s**, tunable **5–30 s**);
 3. summarizes the conversation;
-4. pushes `inbox/auto-<conversation hash>-<last-message time>.json` to the `inbox` branch of post-it-board, and the
+4. pushes `inbox/auto-<conversation hash>-<last-message time>-<add|edit>.json` to the `inbox` branch of post-it-board, and the
    existing GitHub Action pins it.
 
 If the conversation continues later, the automation sends an `edit` that updates the same page instead of adding a
 second one.
 
 - **No phone app, no widget, no foreground service, no xAI API key** for this path.
-- It holds only a **fine-grained GitHub token** limited to post-it-board contents. It never holds Supabase credentials;
-  only the Action does.
+- It holds a **fine-grained GitHub token** limited to post-it-board contents, plus whatever the transcript reader
+  needs (a grok.com session cookie or a signed-in browser profile, either one full access to your Grok account). It
+  never holds Supabase credentials; only the Action does.
 - **Honest caveat:** how the automation actually *reads* your Grok transcript is **unverified**. There is no
   public, documented xAI/Grok API for consumer conversation history. The recommended reader uses grok.com's own
   undocumented `/rest/app-chat/` endpoints with your session cookie (fallback: a signed-in browser profile); both
@@ -135,7 +140,7 @@ workflow pins it. Instructions she can follow: **[docs/ara-instructions.md](docs
 
 If it works, this costs nothing extra and keeps all of the car's Grok features (navigation, car controls). On its
 own, its weakness is that **if you forget to say "post it", nothing is saved**. Path 1 covers that. The automation
-skips the parts of a conversation Ara already posted, so you don't get two pages
+is designed to skip the parts of a conversation Ara already posted (not built yet), so you don't get two pages
 ([details](docs/transcript-automation.md#6-idempotency-and-dedup)).
 
 ### Optional alternative (legacy): custom Android voice app (superseded)
@@ -199,7 +204,8 @@ and the text, with no audio capture at all. The legacy app solved the same probl
 
 If the GitHub token leaks, someone can push files to post-it-board: post or delete notes via the inbox, change the site
 on `main`, or change `main`'s `scripts/post.mjs`, which the inbox workflow runs with the Supabase bot secrets, to steal
-the bot password. **Protect `main` with a branch ruleset** that blocks direct pushes
+the bot password. **Protect `main` with a branch ruleset** that blocks direct pushes, and don't leave pull requests
+from post-it-board branches open: a Contents-write token can merge them
 ([setup-checklist.md](docs/setup-checklist.md) step 2). Revoke a leaked token in one click and revert with git. Store
 tokens in the runner's secret store, never in any repo.
 

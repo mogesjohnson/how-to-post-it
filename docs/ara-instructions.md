@@ -6,8 +6,9 @@
 
 Give these to Ara once (or paste them into her custom instructions). They tell her how to pin notes when
 the driver says **"post it"**. This is the second way to post. The primary, automatic way is the
-[transcript automation](transcript-automation.md), which summarizes conversations after they go quiet. It skips
-the parts Ara already posted, so keep the `ara-` file-name prefix below: that's how her posts are recognized.
+[transcript automation](transcript-automation.md), which summarizes conversations after they go quiet. It is designed
+to skip the parts Ara already posted (not built yet), so keep the `ara-` file-name prefix below: that's how her posts
+will be recognized.
 
 > The repository is **mogesjohnson/post-it-board** (branch `inbox`), **not** how-to-post-it.
 
@@ -17,7 +18,8 @@ the parts Ara already posted, so keep the `ara-` file-name prefix below: that's 
 
 1. Decide the **topic**: 1–4 words naming what we talked about (e.g. "AI agents", "Garage shelves"). Re-use a topic
    from earlier today if it's the same subject, and use its **exact** title. The board ignores case, spaces and
-   punctuation, but tolerates typos only inside longer words, so "Code" and "Node" become two separate pins.
+   punctuation, and forgives only a single missing, extra or swapped letter in longer words (never a changed letter),
+   so "Code" and "Node" become two separate pins, while a few real pairs like "Trail" and "Trial" could still merge.
 2. Write a short **note**: plain text, key points only, at most about 1,200 characters. Use `\n` for line breaks.
 3. Create **one file** in GitHub with your GitHub tool:
    - **Repository:** `mogesjohnson/post-it-board`
@@ -71,13 +73,13 @@ Or look at the board: https://mogesjohnson.github.io/post-it-board/
 - **Never put secrets in files:** no passwords, tokens, API keys, addresses of other people, or anything the driver
   wants private. **The repo and the board are public.**
 - **Never touch other branches or files.** Only create files under `inbox/` on the `inbox` branch.
-- **Always confirm out loud with "Posted."** The transcript automation looks for "post it" followed by your
+- **Always confirm out loud with "Posted."** The transcript automation is designed to look for "post it" followed by your
   confirmation to avoid posting the same conversation a second time.
-- **"Don't post this":** if the driver says it, don't post, and acknowledge briefly. The automation also skips
+- **"Don't post this":** if the driver says it, don't post, and acknowledge briefly. The automation is also designed to skip
   conversations containing that phrase.
 - Limits: pin and title ≤ 200 characters, body ≤ 5000.
-- Statuses you may see: `ok`, `skipped_duplicate` (same text already added in the last 10 min),
-  `skipped_ambiguous`, `skipped_not_found`, `error_invalid` (fix the JSON), `error` (temporary; the owner can
-  re-run the workflow).
+- Statuses you may see: `ok`, `skipped_duplicate` (a page with the same title and text was added in the last
+  10 min), `skipped_ambiguous` (several pins could match, or a rename clashes with another pin), `skipped_not_found`,
+  `error_invalid` (fix the JSON), `error` (temporary; the owner can re-run the workflow).
 
 Full format reference: [post-it-board inbox/README.md](https://github.com/mogesjohnson/post-it-board/blob/inbox/inbox/README.md).

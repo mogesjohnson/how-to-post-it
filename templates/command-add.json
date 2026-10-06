@@ -1,6 +1,6 @@
 {
   "op": "add",
-  "pin": "AI agents",
+  "pin": "how-to-post-it test",
   "title": "Ideas from the drive",
   "body": "Agents = LLM + tools + loop.\nTry a planner/executor split."
 }

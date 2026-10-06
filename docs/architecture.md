@@ -6,8 +6,8 @@ Supabase, and shown on https://mogesjohnson.github.io/post-it-board/.
 
 | Path | Trigger | Writes | Status |
 |---|---|---|---|
-| **1. Transcript automation** (primary) | Newest message in the Grok transcript is older than the silence threshold (default 8 s, 5–30) | `inbox/auto-<convKey>-<ts>.json` (add, later edit) | Designed; transcript-reading method **unverified** ([transcript-automation.md](transcript-automation.md)) |
-| **2. Ara "post it"** | You say "post it" in the car | `inbox/ara-<ts>-<slug>.json` | Instructions written ([ara-instructions.md](ara-instructions.md)) |
+| **1. Transcript automation** (primary) | Newest message in the Grok transcript is older than the silence threshold (default 8 s, 5–30) | `inbox/auto-<convKey>-<ts>-<op>.json` (add, later edit) | Designed; transcript-reading method **unverified** ([transcript-automation.md](transcript-automation.md)) |
+| **2. Ara "post it"** | You say "post it" in the car | `inbox/ara-<ts>-<slug>.json` | Instructions written ([ara-instructions.md](ara-instructions.md)); **untested**: assumes Ara can create files in GitHub (unverified) |
 | Legacy Android voice app | Its own realtime-session timer | `inbox/<session-id>.json` | Superseded ([below](#legacy-path-custom-android-voice-app-superseded)) |
 
 > The inbox is in **post-it-board**, not in this repo. how-to-post-it has no `inbox` branch.
@@ -54,7 +54,7 @@ flowchart LR
   Sum -- "1: PUT inbox/auto-*.json" --> Inbox
 
   %% Path 2
-  BuiltIn -- "2: on 'post it', GitHub tool<br/>writes inbox/ara-*.json" --> Inbox
+  BuiltIn -- "2: on 'post it', GitHub tool (unverified)<br/>writes inbox/ara-*.json" --> Inbox
 
   %% Shared
   Inbox -- "push trigger" --> Actions
@@ -71,7 +71,7 @@ flowchart LR
  ==============================                        ===========================
 
   Driver ──talks──▶ Built-in Grok (Ara, in the car) ──────"…post it"──────┐
-                         │ conversation syncs                              │ GitHub tool
+                         │ conversation syncs                              │ GitHub tool (unverified)
                          ▼                                                 │ inbox/ara-<ts>-<slug>.json
               Grok history (transcript + timestamps,                       │
               visible in the phone's Grok app)                             │
@@ -84,7 +84,7 @@ flowchart LR
               │ • summarize whole conversation   │                         │
               │ • fine-grained token (contents)  │                         │
               └───────────────┬─────────────────┘                         │
-                              │ PUT inbox/auto-<convKey>-<ts>.json         │
+                              │ PUT inbox/auto-<convKey>-<ts>-<op>.json    │
                               ▼  (add first, edit on later updates)        ▼
                     ┌───────────────────────────────────────────────────────────────┐
                     │ GitHub  mogesjohnson/post-it-board  ·  branch "inbox"          │
@@ -106,7 +106,7 @@ flowchart LR
 
 | Component | Responsibility | Not responsible for |
 |-----------|----------------|---------------------|
-| **Ara (built-in car Grok)** | The conversation itself. Path 2: on "post it", turns the conversation into a command file and pushes `inbox/ara-*.json` via her GitHub tools. Can check `inbox/results/` | Detecting silence or posting automatically. Exposes no events to the phone |
+| **Ara (built-in car Grok)** | The conversation itself. Path 2: on "post it", is meant to turn the conversation into a command file and push `inbox/ara-*.json` via a GitHub tool (**untested**: that tool is unverified). Could check `inbox/results/` | Detecting silence or posting automatically. Exposes no events to the phone |
 | **Grok history / phone Grok app** | Keeps the car conversation as a transcript with timestamps | Any API we know of for reading it programmatically (**unverified**, see [transcript-automation.md §2](transcript-automation.md#2-reading-the-transcript-unverified-choose-one)) |
 | **Transcript automation** | Path 1: reads recent conversations, measures quiet time, keeps state per conversation, summarizes, pushes `inbox/auto-*.json` (add, later edit), reads results, alerts on failures | Supabase credentials (it never has them). Real-time precision: it's only as fast as its poll interval |
 | **GitHub inbox + Actions** | Accepts command files on `inbox`, runs `post.mjs` with encrypted repo secrets as the bot account, writes `inbox/results/<name>.json`, deletes processed commands (keeps them on `error`), serialized by a concurrency group | Deciding *what* to post; it only executes commands |
@@ -176,7 +176,7 @@ used).
 3. If the same session fires again (you kept talking), update the **same path** with its current `sha`, so the newer
    summary replaces the older command.
 
-**Replace vs. duplicate:** `post.mjs` already skips *identical* text added to the same pin within 10 minutes. But a
+**Replace vs. duplicate:** `post.mjs` already skips an *identical* title and text added to the same pin within 10 minutes. But a
 *longer* second summary is different text, so today it would be added as a second page. True **replace**
 semantics need the session id:
 
@@ -211,8 +211,10 @@ extracted. The options:
 - **xAI API key.**
 - **Storage:** both are typed into the app's Settings once and stored in **Android Keystore-backed
   EncryptedSharedPreferences**. They are **never** in source code or any repo.
-- **Blast radius:** if the PAT leaks, someone can push files to post-it-board (and so post or delete notes through the
-  inbox). Nothing else on your account is reachable. Revoke it on GitHub in one click.
+- **Blast radius:** if the PAT leaks, someone can push files to post-it-board: post or delete notes through the
+  inbox, change the site on `main`, or change `main`'s `scripts/post.mjs` (which the inbox workflow runs with the
+  Supabase bot secrets) to steal the bot password. Protect `main` with a ruleset
+  ([setup-checklist.md](setup-checklist.md) step 2). Revoke the token on GitHub in one click.
 - **xAI realtime auth:** xAI documents **ephemeral client secrets** (`POST https://api.x.ai/v1/realtime/client_secrets`)
   for mobile and browser clients, and recommends them over putting the API key on the client. Minting one needs the real
   API key, so in option (a) the app would mint its own tokens and the key still lives on the phone. True separation
@@ -260,7 +262,7 @@ flowchart LR
 
   %% Ara "post it"
   Driver -- "talks, says 'post it'" --> BuiltIn
-  BuiltIn -- "GitHub tool writes<br/>inbox/ara-*.json" --> Inbox
+  BuiltIn -- "GitHub tool (unverified) writes<br/>inbox/ara-*.json" --> Inbox
 
   %% Legacy app
   Driver <-- "voice" --> CarAudio
@@ -362,7 +364,7 @@ Timer rules:
 4. **Fire again later?** If the conversation continues and goes quiet again, the app summarizes the whole session again
    and **updates the same file path** (`inbox/<session-id>.json`) using the file's current `sha`.
    - If the earlier command was already processed (file deleted by the workflow), the PUT creates it again. Today
-     `post.mjs` would then add a second page, unless the text is identical (dedup).
+     `post.mjs` would then add a second page, unless the title and text are identical (dedup).
    - Once the proposed `sessionId` field lands, the second command will **replace** the first page.
 5. **"Post it"** inside the app triggers the same path immediately.
 
@@ -375,11 +377,11 @@ Timer rules:
 | Bluetooth disconnect (car off) | `ACTION_ACL_DISCONNECTED` / companion device gone | Treat as end of session: fire the safety net right away if there's an unposted transcript, then stop the service |
 | Ara pauses while "thinking" | no `response.done` yet | Timer doesn't start until `response.done`, so no false fire |
 | Driver silent but radio/passenger audible | server VAD detects speech | Timer resets. Worst case it posts later; it never loses data |
-| Duplicate summaries | same text / same session | `post.mjs` dedups identical text within 10 min. Same-session replace needs the proposed `sessionId` field. The app updates one file path per session |
-| Ambiguous topic | result `skipped_ambiguous` | Log screen shows it. The app can retry with the exact existing pin title from the result's `candidates` |
+| Duplicate summaries | same title and text / same session | `post.mjs` dedups an identical title and text within 10 min. Same-session replace needs the proposed `sessionId` field. The app updates one file path per session |
+| Ambiguous topic | result `skipped_ambiguous` | Log screen shows it with the result's `candidates`. You pick the right pin and resend; the app can't choose for you |
 | GitHub 409/422 on PUT (stale `sha`) | response code | Re-GET the file, take the fresh `sha` (or none if it's gone) and retry once |
 | PAT expired/revoked | 401/403 | Notification: "GitHub token invalid, open settings". The command stays queued |
 | xAI key invalid / out of credit | 401/402/429 or `error` event | Notification. Fall back to posting the raw last turns (no summary) if the text API fails but a transcript exists |
 | Workflow failure (`error` status) | result file status `error` | Command file is kept by the workflow. Re-run the workflow from GitHub Actions |
 | Phone killed the service (OEM battery saver) | service restarted / gap in heartbeat | Persistent notification, battery-optimization exemption prompt, foreground service. The transcript is flushed to disk every turn so a restart can still post |
-| Built-in Grok used instead | n/a | Fine: Ara posts on "post it", and the transcript automation covers the rest. The legacy app isn't involved |
+| Built-in Grok used instead | n/a | Fine: Ara's "post it" (untested) and the transcript automation cover it. The legacy app isn't involved |
