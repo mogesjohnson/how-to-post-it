@@ -1,32 +1,32 @@
 # How to post it 🚗 ➜ 📌
 
-**How dictated car notes reach the [Post-it Board](https://mogesjohnson.github.io/post-it-board/):**
-the voice app spec, the AI Studio prompt, and the architecture.
+**How conversations with Grok in the car reach the [Post-it Board](https://mogesjohnson.github.io/post-it-board/):**
+the recommended transcript automation, Ara's "post it" command, and the architecture behind both.
 
-This is a **documentation and spec repo**. It has no app code yet and no secrets. The app is generated
-from [`docs/ai-studio-prompt.md`](docs/ai-studio-prompt.md).
+This is a **documentation and spec repo**. It has no app code and no secrets.
 
 | Doc | What's in it |
 |-----|--------------|
-| [docs/architecture.md](docs/architecture.md) | Diagrams of both write paths, who does what, the safety-net timer, failure modes |
-| [docs/ai-studio-prompt.md](docs/ai-studio-prompt.md) | One copy-paste prompt that generates the Android app |
-| [docs/ara-instructions.md](docs/ara-instructions.md) | What the built-in car Grok ("Ara") does when you say "post it" |
+| [docs/transcript-automation.md](docs/transcript-automation.md) | **Primary path:** read the Grok transcript, detect silence, summarize, push to the inbox. Loop, pseudocode, dedup, failure modes |
+| [docs/ara-instructions.md](docs/ara-instructions.md) | Second way: what the car's Grok ("Ara") does when you say "post it" |
+| [docs/architecture.md](docs/architecture.md) | Diagrams of all write paths, who does what, failure modes |
 | [docs/setup-checklist.md](docs/setup-checklist.md) | The steps you do by hand |
 | [docs/risks.md](docs/risks.md) | Honest risks and the list of unverified assumptions |
 | [templates/](templates/) | Example command files (add / edit / delete) |
 | [scripts/send-test-command.sh](scripts/send-test-command.sh) | Pushes a test command into the board's inbox with `gh` |
+| [docs/ai-studio-prompt.md](docs/ai-studio-prompt.md) | *Superseded, optional legacy:* prompt for the old Android voice app |
 
 ---
 
 ## Goal
 
-Dictate notes while driving a Tesla and have them land on the board with **zero friction**:
+Talk to Grok while driving the Tesla and have the conversation land on the board with **zero friction**:
 
-- say **"post it"** and the note is pinned (one pin per topic, one page per note);
-- **safety net:** if the conversation ends *without* "post it", the session is still summarized and
-  pinned automatically, so nothing is lost.
+- **automatically:** when a conversation goes quiet, it is summarized and pinned, even if you never said
+  "post it", so nothing is lost;
+- **on demand:** say **"post it"** and Ara pins the note right away.
 
-No screens, no typing, no taps while driving.
+One pin per topic, one page per conversation. No screens, no typing, no taps while driving.
 
 ## The existing board (already live)
 
@@ -37,13 +37,20 @@ Repo: **[mogesjohnson/post-it-board](https://github.com/mogesjohnson/post-it-boa
 - **Data:** Supabase (free plan). The tables are `days`, `pins`, `pages` and `board_owners`, all with Row Level Security:
   - the **anon key** in the site's `config.js` is public by design and can only **read**;
   - **writes** are allowed only for signed-in users listed in `public.board_owners`, which today means the human owner and a
-    **bot account** used by automation;
+    **bot account** (`johnsonmoges+postit-bot@gmail.com`) used by automation;
+  - public sign-ups are off;
   - deleting a pin removes its pages too (cascade).
 - **Writer:** `scripts/post.mjs` (Node 18+). It does quick-add from the command line and also runs JSON command files.
-- **Inbox:** a GitHub Actions workflow on the **`inbox` branch**. Anything that can push a JSON file to
-  `inbox/<name>.json` can add, edit or delete notes. The workflow signs in as the bot, applies the command,
-  writes `inbox/results/<name>.json`, removes the command file and pushes the result back.
+- **Inbox:** a GitHub Actions workflow (`.github/workflows/inbox.yml`) on the **`inbox` branch of post-it-board**.
+  Anything that can push a JSON file to `inbox/<name>.json` there can add, edit or delete notes. The workflow runs
+  `scripts/post.mjs --command-file` signed in as the bot (using the encrypted repo secrets `SUPABASE_URL`,
+  `SUPABASE_ANON_KEY`, `SUPABASE_OWNER_EMAIL`, `SUPABASE_OWNER_PASSWORD`), writes `inbox/results/<name>.json`,
+  removes the command file and pushes the result back.
   Full format: **[post-it-board inbox/README.md (inbox branch)](https://github.com/mogesjohnson/post-it-board/blob/inbox/inbox/README.md)**.
+
+> **Which repo has the inbox?** `mogesjohnson/post-it-board`, branch `inbox`. **Not this repo:** how-to-post-it
+> has no `inbox` branch, and files pushed here do nothing. (An earlier request said "how-to-post-it's inbox
+> branch"; that was a slip.)
 
 Command format in brief:
 
@@ -63,60 +70,100 @@ Command format in brief:
 | `error` | real failure (auth, network, database); the command file is kept for a retry |
 
 **add** matches the topic loosely (case, spaces, punctuation and small typos are ignored), so "AI" and "ai!"
-land on the same pin. **edit/delete** never guess.
+land on the same pin. **edit/delete** need the exact pin title plus a `target`, and never guess.
 
 ## Why the board repo stays public
 
+- **No secrets live in the repo.** Not in post-it-board, not here. The only key in the site code is the anon key,
+  which is public by design.
 - **Actions secrets are encrypted.** They are never shown in logs (GitHub masks them) and are only
-  available to workflows in this repo.
+  available to workflows in that repo.
 - **Forks can't get the secrets.** Workflows triggered by pull requests from forks don't receive repository secrets, and the
   inbox workflow only runs on pushes to `inbox`, which needs write access.
-- **The anon key is public by design.** It's in the site's JavaScript anyway, and RLS makes it read-only.
+- **RLS blocks anonymous writes.** The anon key is read-only by design. Writes need a signed-in account listed in
+  `public.board_owners`.
+- **Never use a `service_role` key.** It bypasses RLS. The inbox signs in as the bot account instead, so RLS
+  still applies to every write.
 - **GitHub Pages on a private repo needs a paid plan.** Keeping the repo public keeps the board free.
 - **The notes are public anyway.** Command and result files are readable in the repo, but they only contain note text,
   which the board shows publicly.
 
-## Two write paths
+## Ways to post
 
-### A: Ara in the car says "post it" (built-in Grok)
+### 1. Recommended: transcript automation (automatic)
+
+The Grok app on your phone **mirrors the car conversation** with Ara as a live transcript with timestamps. An
+automation or script (not Ara herself):
+
+1. periodically reads the conversation transcript;
+2. notices when the newest message is older than the **silence threshold** (default **8 s**, tunable **5–30 s**);
+3. summarizes the conversation;
+4. pushes `inbox/auto-<conversation hash>-<last-message time>.json` to the `inbox` branch of post-it-board, and the
+   existing GitHub Action pins it.
+
+If the conversation continues later, the automation sends an `edit` that updates the same page instead of adding a
+second one.
+
+- **No phone app, no widget, no foreground service, no xAI API key** for this path.
+- It holds only a **fine-grained GitHub token** limited to post-it-board contents. It never holds Supabase credentials;
+  only the Action does.
+- **Honest caveat:** how the automation actually *reads* your Grok transcript is **unverified**. We know of no
+  public xAI/Grok API for consumer conversation history. The options (official export, Grok Automation, browser
+  automation of grok.com, or just asking Ara) and their tradeoffs are in the doc.
+- **Timing:** the threshold is a *minimum* quiet time, checked at each poll. A scheduled job such as GitHub
+  Actions cron can't run more often than every 5 minutes, so with cron "8 s" means "at least 8 s of silence,
+  noticed at the next run", not "posted within 8 s".
+
+Full design: **[docs/transcript-automation.md](docs/transcript-automation.md)**.
+
+### 2. Ara in the car says "post it" (on demand)
 
 The car's built-in Grok ("Ara") has GitHub tools. When you say **"post it"**, she writes
 `inbox/ara-<YYYYMMDDTHHMMSS>-<slug>.json` to the `inbox` branch of `mogesjohnson/post-it-board`, and the
 workflow pins it. Instructions she can follow: **[docs/ara-instructions.md](docs/ara-instructions.md)**.
 
-This path costs nothing extra and keeps all of the car's Grok features (navigation, car controls). Its only weakness:
-**if you forget to say "post it", nothing is saved.**
+This costs nothing extra, keeps all of the car's Grok features (navigation, car controls), and works today. On its
+own, its weakness is that **if you forget to say "post it", nothing is saved**. Path 1 covers that. The automation
+skips the parts of a conversation Ara already posted, so you don't get two pages
+([details](docs/transcript-automation.md#6-idempotency-and-dedup)).
 
-### B: Safety net, a custom Android voice app
+### Optional alternative (legacy): custom Android voice app (superseded)
 
-A native Android app (Kotlin + Jetpack Compose) runs **its own Ara session** through xAI's realtime voice
-API and plays it through the car over Bluetooth. Because the app *is* the conversation, it knows exactly
-when each side speaks and has the full transcript. When the conversation goes quiet it summarizes and
-pins it, whether or not you said "post it". Details below and in
-**[docs/architecture.md](docs/architecture.md)**.
+> **Superseded.** Kept only as a fallback in case the transcript can't be read reliably.
 
-> **Trade-off:** while you use the custom app, you are *not* using the car's built-in Grok, so that session has no
-> car controls or navigation through Grok. Path A still works whenever you talk to the built-in Grok and say "post it".
+The earlier design was a native Android app (Kotlin + Jetpack Compose, generated with Google AI Studio) that ran
+**its own Ara session** through xAI's realtime voice API, played through the car over Bluetooth, and used Ara's
+"finished speaking" events to start an 8 s silence timer (tunable 5–30 s). It needed a home-screen widget, a
+foreground service, Bluetooth audio routing, an xAI API key and one tap before each drive. While you used it you
+lost the car's built-in Grok features (navigation, car controls).
+
+Legacy docs (kept for reference):
+
+- [docs/ai-studio-prompt.md](docs/ai-studio-prompt.md): the one copy-paste prompt that generates the app;
+- [docs/architecture.md → Legacy path](docs/architecture.md#legacy-path-custom-android-voice-app-superseded): timer rules, sequence diagram, failure modes;
+- [docs/setup-checklist.md → Legacy steps](docs/setup-checklist.md#legacy-optional-android-voice-app-superseded): xAI key, AI Studio build, install, car pairing;
+- [docs/risks.md → Legacy risks](docs/risks.md#legacy-path-risks-android-voice-app-superseded).
+
+Why it was replaced: [comparison table](docs/transcript-automation.md#how-this-replaces-the-phone-app-design).
 
 ---
 
 ## Why not Bluetooth "downlink sniffing"
 
-The original idea was to have a phone app watch the Bluetooth hands-free (HFP) **downlink** to notice
+The very first idea was to have a phone app watch the Bluetooth hands-free (HFP) **downlink** to notice
 when the car's built-in Grok stops talking, then summarize and post. **That does not work**, for four
 independent reasons:
 
-1. **The car's Grok never goes through the phone.** The built-in Grok runs in the car and plays through the car's
-   speakers. Its audio is never sent to the phone over Bluetooth, so there is no stream to listen to.
+1. **The car's Grok audio never goes through the phone.** The built-in Grok runs in the car and plays through the
+   car's speakers. Its audio is never sent to the phone over Bluetooth, so there is no stream to listen to.
 2. **HFP flows the other way round.** In the hands-free profile the *phone* is the audio gateway. Phone → car
    carries call audio to the car speakers, and car mic → phone carries the driver's voice. There is no
    "car assistant → phone" channel.
 3. **Third-party apps can't read call audio anyway.** Capturing SCO/HFP call audio or other apps' output requires
    `CAPTURE_AUDIO_OUTPUT`, a signature/privileged permission that is only granted to system apps.
-4. **Even perfect timing would be useless.** The built-in Grok exposes **no transcript** to the phone, so there would be
-   nothing to summarize.
+4. **Bluetooth carries no text.** Even perfect audio timing would give nothing to summarize.
 
-**No Tesla or Grok hooks exist either.** Tesla's
+**No Tesla or Grok event hooks exist either.** Tesla's
 [Fleet Telemetry available data](https://developer.tesla.com/docs/fleet-api/fleet-telemetry/available-data) covers
 vehicle signals (charging, climate, driving, location, media, safety…), with no voice-assistant or session events.
 xAI's [Grok Automations](https://x.ai/news/grok-automations) run **on a schedule or when an email arrives**,
@@ -126,105 +173,31 @@ not on in-car voice events or session end.
 the radio. It also runs into **two-party (all-party) consent** laws in states such as **Maryland and California**,
 where recording a private conversation needs everyone's consent. Not worth the legal or privacy risk.
 
-**The fix: own the conversation.** If the app *is* the voice assistant, it legitimately has the timing and the
-transcript. That's path B.
+**What works instead:** the conversation is already saved as a **text transcript in your Grok account** (that's
+why it shows up in the phone's Grok app). Reading that transcript after the fact (path 1) gives both the timing
+and the text, with no audio capture at all. The legacy app solved the same problem by *being* the voice assistant.
 
----
+## Secrets model
 
-## The working design (path B)
+| Path | Holds | Never holds |
+|---|---|---|
+| Inbox workflow (post-it-board Actions) | Encrypted repo secrets for the Supabase bot sign-in | — |
+| 1. Transcript automation | A **fine-grained GitHub PAT**: only `mogesjohnson/post-it-board`, **Contents: read and write**, ≤ 90-day expiry. Plus whatever the transcript reader needs (e.g. a signed-in Grok session for browser automation, which is sensitive) | Supabase credentials, `service_role` key |
+| 2. Ara "post it" | Her own GitHub tool access | Supabase credentials |
+| Legacy Android app | GitHub PAT + xAI key in Keystore-backed storage on the phone ([details](docs/architecture.md#secrets-model-legacy-app)) | Supabase credentials |
 
-**App:** native Android, Kotlin + Jetpack Compose.
-
-**Voice:** the app opens its own session with xAI's realtime voice API, **`wss://api.x.ai/v1/realtime`**, voice **`ara`**
-([docs](https://docs.x.ai/developers/model-capabilities/audio/speech-to-speech)), with server VAD turn detection.
-Audio goes through the car over Bluetooth (phone call/communication audio routing, so the car's mic and speakers are
-used).
-
-**What the API tells the app:**
-
-| Event | Meaning for the app |
-|-------|---------------------|
-| `input_audio_buffer.speech_started` | you started talking → **cancel the timer** |
-| `input_audio_buffer.speech_stopped` | you stopped talking |
-| `response.output_audio.done` / `response.done` | Ara finished her turn → **start the timer** (if nothing else is pending) |
-| input/output transcript events | both sides as text → the transcript to summarize |
-
-**Safety-net timer**
-
-- It starts only after Ara finishes speaking (`response.done`) **and** no response is pending (no tool call in progress, no
-  queued `response.create`).
-- It resets whenever you start speaking.
-- **Default: 8 seconds** (your starting guess). It can be set from **5 to 30 s** in settings.
-- Research suggests the built-in car Grok closes after **~15 s** of inactivity. That comes from secondary sources and is
-  **unverified**. Ara can also pause while thinking, which is why the timer waits for `response.done`, not
-  just silence.
-
-**When the timer fires**
-
-1. Summarize the session transcript with the xAI text API (Gemini is an alternative), and derive a short pin topic.
-2. Push `inbox/<session-id>.json` with `op: add` to `mogesjohnson/post-it-board` on branch `inbox` via the GitHub
-   contents API (`PUT /repos/{owner}/{repo}/contents/{path}` with `branch: inbox`).
-3. If the same session fires again (you kept talking), update the **same path** with its current `sha`, so the newer
-   summary replaces the older command.
-
-**Replace vs. duplicate:** `post.mjs` already skips *identical* text added to the same pin within 10 minutes. But a
-*longer* second summary is different text, so today it would be added as a second page. True **replace**
-semantics need the session id:
-
-> **Proposed follow-up in post-it-board (not implemented yet):** add an optional `"sessionId"` field. When an
-> `add` arrives with a sessionId that already created a page, `post.mjs` edits that page instead of adding a new
-> one. Until then, `sessionId` is ignored.
-
-**"Post it" inside the app** pushes immediately and doesn't wait for the timer.
-
-**Runs in the car without touching the phone**
-
-- **Foreground service:** type `microphone` + `connectedDevice` (+ `mediaPlayback` if output goes over A2DP), with a
-  persistent notification.
-- **Auto-arm on car connect:**
-  - **CompanionDeviceManager** is the sanctioned way to react when the car's Bluetooth device appears.
-  - A receiver for `BluetoothDevice.ACTION_ACL_CONNECTED` is a fallback. It needs `BLUETOOTH_CONNECT` on Android 12+.
-- **One-tap honesty:** Android 14+ won't let a backgrounded app *start* a **microphone** foreground service, even with the
-  companion exemption, because `RECORD_AUDIO` is a while-in-use permission. So the app **arms itself** when the car
-  connects (notification + widget ready). The microphone session starts with **one tap** on the notification or widget,
-  or when the app is already open. Tap before you pull out. See [docs/risks.md](docs/risks.md).
-- **Home-screen widget (Glance):** status, countdown, **Force post**, **Cancel**.
-- **Log screen:** what was posted and each inbox result status, read by polling `inbox/results/<session-id>.json`.
-
-## Secrets model (honest)
-
-Android apps have **no truly safe place for long-lived secrets** in client code. Anything shipped in the APK can be
-extracted. The options:
-
-**(a) Recommended for personal use: keys you enter once, kept on the device.**
-- **GitHub token:** a **fine-grained GitHub PAT** limited to **only `mogesjohnson/post-it-board`**, permission
-  **Contents: read and write**, nothing else.
-- **xAI API key.**
-- **Storage:** both are typed into the app's Settings once and stored in **Android Keystore-backed
-  EncryptedSharedPreferences**. They are **never** in source code or any repo.
-- **Blast radius:** if the PAT leaks, someone can push files to post-it-board (and so post or delete notes through the
-  inbox). Nothing else on your account is reachable. Revoke it on GitHub in one click.
-- **xAI realtime auth:** xAI documents **ephemeral client secrets** (`POST https://api.x.ai/v1/realtime/client_secrets`)
-  for mobile and browser clients, and recommends them over putting the API key on the client. Minting one needs the real
-  API key, so in option (a) the app would mint its own tokens and the key still lives on the phone. True separation
-  needs option (b). *(Verify the details in xAI's docs before building.)*
-
-**(b) A tiny proxy holding the keys** (e.g. a Cloudflare Worker on the free tier).
-- The phone calls the proxy. The proxy mints xAI ephemeral tokens and does the GitHub push.
-- Keys never touch the phone. The cost is one more thing to deploy and protect (the proxy itself needs auth).
-
-**About Google AI Studio:** the "AI Studio auto-configures a server-side `GEMINI_API_KEY` secret" behaviour applies to
-**AI Studio web apps**. Whether AI Studio's **Android build mode** offers server-side secrets is **UNVERIFIED**, so don't
-count on it. Also, **AI Studio's emulator can't test Bluetooth or car audio routing**. Test on a real phone via `adb`.
+If the GitHub token leaks, the worst case is someone pushing files to post-it-board (posting or deleting notes via the
+inbox, or changing the site on `main`). Revoke it in one click and revert with git. Store tokens in the runner's
+secret store, never in any repo.
 
 ## Status
 
 | Item | Status |
 |------|--------|
 | Board, Supabase, inbox workflow | ✅ live (post-it-board) |
-| Path A (Ara pushes to inbox) | 📄 instructions written ([ara-instructions](docs/ara-instructions.md)) |
-| Path B (Android safety-net app) | 📄 spec + generation prompt ([ai-studio-prompt](docs/ai-studio-prompt.md)), app not built yet |
-| `sessionId` replace semantics in `post.mjs` | 🔜 proposed follow-up, not implemented |
+| 1. Transcript automation | 📄 designed ([transcript-automation](docs/transcript-automation.md)). **Transcript-reading method unverified**, not built yet |
+| 2. Ara pushes to inbox on "post it" | 📄 instructions written ([ara-instructions](docs/ara-instructions.md)) |
+| Legacy Android voice app | 🗄️ superseded. Spec + generation prompt kept ([ai-studio-prompt](docs/ai-studio-prompt.md)), not built |
 
 ## License
 

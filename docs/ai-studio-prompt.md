@@ -1,3 +1,14 @@
+> **⚠️ Superseded — optional legacy path**
+>
+> This prompt builds the **old** design: a custom Android voice app running its own Ara session through xAI's
+> realtime voice API. It has been **superseded** by the [transcript automation](transcript-automation.md), which
+> needs no phone app, no widget, no foreground service and no xAI API key. Ara's "post it"
+> ([ara-instructions.md](ara-instructions.md)) remains the second way to post.
+>
+> Use this prompt only if the Grok transcript turns out to be unreadable and you want exact, real-time silence
+> detection anyway. See the [comparison](transcript-automation.md#how-this-replaces-the-phone-app-design) and the
+> [legacy setup steps](setup-checklist.md#legacy-optional-android-voice-app-superseded).
+
 # Google AI Studio prompt (Build mode, Android)
 
 Copy everything inside the fenced block below into **Google AI Studio → Build** (Android). The same prompt also

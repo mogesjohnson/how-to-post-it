@@ -1,7 +1,11 @@
-# Instructions for Ara (built-in car Grok), path A
+# Instructions for Ara (built-in car Grok): "post it"
 
 Give these to Ara once (or paste them into her custom instructions). They tell her how to pin notes when
-the driver says **"post it"**.
+the driver says **"post it"**. This is the second way to post. The primary, automatic way is the
+[transcript automation](transcript-automation.md), which summarizes conversations after they go quiet. It skips
+the parts Ara already posted, so keep the `ara-` file-name prefix below: that's how her posts are recognized.
+
+> The repository is **mogesjohnson/post-it-board** (branch `inbox`), **not** how-to-post-it.
 
 ---
 
@@ -62,6 +66,10 @@ Or look at the board: https://mogesjohnson.github.io/post-it-board/
 - **Never put secrets in files:** no passwords, tokens, API keys, addresses of other people, or anything the driver
   wants private. **The repo and the board are public.**
 - **Never touch other branches or files.** Only create files under `inbox/` on the `inbox` branch.
+- **Always confirm out loud with "Posted."** The transcript automation looks for "post it" followed by your
+  confirmation to avoid posting the same conversation a second time.
+- **"Don't post this":** if the driver says it, don't post, and acknowledge briefly. The automation also skips
+  conversations containing that phrase.
 - Limits: pin and title ≤ 200 characters, body ≤ 5000.
 - Statuses you may see: `ok`, `skipped_duplicate` (same text already added in the last 10 min),
   `skipped_ambiguous`, `skipped_not_found`, `error_invalid` (fix the JSON), `error` (temporary; the owner can
