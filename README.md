@@ -3,10 +3,13 @@
 **How conversations with Grok in the car reach the [Post-it Board](https://mogesjohnson.github.io/post-it-board/):**
 the recommended transcript automation, Ara's "post it" command, and the architecture behind both.
 
+> **New here? Start with [docs/main-workflow-goal.md](docs/main-workflow-goal.md)**, the whole story of this project on one page.
+
 This is a **documentation and spec repo**. It has no app code and no secrets.
 
 | Doc | What's in it |
 |-----|--------------|
+| [docs/main-workflow-goal.md](docs/main-workflow-goal.md) | **Start here:** plain-language overview of the whole project |
 | [docs/transcript-automation.md](docs/transcript-automation.md) | **Primary path:** read the Grok transcript, detect silence, summarize, push to the inbox. Loop, pseudocode, dedup, failure modes |
 | [docs/ara-instructions.md](docs/ara-instructions.md) | Second way: what the car's Grok ("Ara") does when you say "post it" |
 | [docs/architecture.md](docs/architecture.md) | Diagrams of all write paths, who does what, failure modes |
