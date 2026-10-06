@@ -1,4 +1,4 @@
-# The main workflow goal: the whole story in one page
+# Main plan for workflow - same name pinned on the Grok app for the chat
 
 This page explains the project in plain language. If you're new to this repo, start here. The other docs go deeper on each part, and they're linked along the way.
 
