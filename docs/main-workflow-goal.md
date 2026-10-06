@@ -21,7 +21,7 @@ The goal was simple to state: **save a short summary of each car conversation to
 3. The workflow signs in to Supabase as a dedicated **bot account**, using **encrypted repository secrets**, and runs `scripts/post.mjs`.
 4. The note gets **added, edited, or deleted**, and the outcome is written back as `inbox/results/<name>.json`, for example `ok` or `skipped_duplicate`.
 
-This path has been built and tested end to end. The writer only needs permission to push a file. It never sees the Supabase login.
+This path has been built and tested end to end. The writer only needs permission to push a file. It never sees the Supabase login. The workflow now fails visibly (a red run in GitHub Actions) if it can't push the result back, instead of passing silently.
 
 > Note: the inbox branch lives in **post-it-board**, not in this how-to-post-it repo. This repo holds only documentation.
 
@@ -40,7 +40,7 @@ Here's how it's meant to work:
 
 If the conversation picks up again later, the script **edits** the same page instead of creating a duplicate. The full design, with pseudocode, dedup rules and failure modes, is in [transcript-automation.md](transcript-automation.md).
 
-Ara's **"post it"** command still works alongside this. She pushes an inbox file herself, right away. See [ara-instructions.md](ara-instructions.md).
+Ara's **"post it"** command is meant to work alongside this: she pushes an inbox file herself, right away. See [ara-instructions.md](ara-instructions.md). It's **untested**: it assumes the car's Grok has a tool that can create files in GitHub, which hasn't been verified, and no `ara-…` result has appeared in the inbox yet.
 
 ## 4. The fallback plan (issue #3)
 
@@ -82,6 +82,7 @@ The full list is in [setup-checklist.md](setup-checklist.md).
 - **The Supabase bot login lives in encrypted GitHub Actions secrets.** Only the workflow can use them, and they never appear in logs, chat, or files.
 - **The database blocks anonymous writes.** Supabase Row Level Security lets the public key only *read*. Adding, editing, or deleting requires signing in as one of the two approved owner accounts, and public sign-ups are turned off. No all-powerful `service_role` key is used anywhere.
 - **The grok.com session cookie stays on the always-on machine.** It's full access to the Grok account, so it never goes in a repo, a secret shared with anyone else, or a chat.
+- **One caveat: posted text stays in git history.** Every inbox command and result file holds the full note text in the public post-it-board repo, on the `inbox` branch. Deleting a note from the board doesn't remove it from there; only rewriting that branch's history does. So summaries must never contain anything sensitive.
 
 ## How the old phone-app idea fits in
 

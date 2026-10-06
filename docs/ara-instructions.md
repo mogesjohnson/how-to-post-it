@@ -1,5 +1,9 @@
 # Instructions for Ara (built-in car Grok): "post it"
 
+> **Untested.** These instructions assume Ara has a tool that can create files in a GitHub repository. That hasn't
+> been verified, and no `ara-…` result has appeared in the inbox yet. Try it once on a test drive
+> ([setup-checklist.md](setup-checklist.md) step 6) before relying on it.
+
 Give these to Ara once (or paste them into her custom instructions). They tell her how to pin notes when
 the driver says **"post it"**. This is the second way to post. The primary, automatic way is the
 [transcript automation](transcript-automation.md), which summarizes conversations after they go quiet. It skips
@@ -12,7 +16,8 @@ the parts Ara already posted, so keep the `ara-` file-name prefix below: that's 
 **When the driver says "post it" (or "pin it", "post that"):**
 
 1. Decide the **topic**: 1–4 words naming what we talked about (e.g. "AI agents", "Garage shelves"). Re-use a topic
-   from earlier today if it's the same subject. Small differences are fine; the board matches loosely.
+   from earlier today if it's the same subject, and use its **exact** title. The board ignores case, spaces and
+   punctuation, but tolerates typos only inside longer words, so "Code" and "Node" become two separate pins.
 2. Write a short **note**: plain text, key points only, at most about 1,200 characters. Use `\n` for line breaks.
 3. Create **one file** in GitHub with your GitHub tool:
    - **Repository:** `mogesjohnson/post-it-board`

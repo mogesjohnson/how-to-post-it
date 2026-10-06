@@ -72,8 +72,11 @@ Command format in brief:
 | `error_invalid` | bad JSON or bad fields |
 | `error` | real failure (auth, network, database); the command file is kept for a retry |
 
-**add** matches the topic loosely (case, spaces, punctuation and small typos are ignored), so "AI" and "ai!"
-land on the same pin. **edit/delete** need the exact pin title plus a `target`, and never guess.
+**add** ignores case, spaces and punctuation, so "AI" and "ai!" land on the same pin, and a whole-word prefix
+matches ("Python lists" → "Python"). Typos are tolerated only inside longer words (5+ letters, same first letter),
+so short different words like "Code" and "Node" stay separate pins. Writers should reuse the **exact** topic title
+from earlier the same day instead of relying on matching. **edit/delete** need the exact pin title plus a `target`,
+and never guess.
 
 ## Why the board repo stays public
 
@@ -89,7 +92,9 @@ land on the same pin. **edit/delete** need the exact pin title plus a `target`, 
   still applies to every write.
 - **GitHub Pages on a private repo needs a paid plan.** Keeping the repo public keeps the board free.
 - **The notes are public anyway.** Command and result files are readable in the repo, but they only contain note text,
-  which the board shows publicly.
+  which the board shows publicly. **That text also stays in the `inbox` branch's git history:** deleting a note from
+  the board doesn't remove it from the repo. Only a history rewrite of the `inbox` branch does, so keep summaries free
+  of anything sensitive.
 
 ## Ways to post
 
@@ -123,11 +128,12 @@ Full design: **[docs/transcript-automation.md](docs/transcript-automation.md)**.
 
 ### 2. Ara in the car says "post it" (on demand)
 
-The car's built-in Grok ("Ara") has GitHub tools. When you say **"post it"**, she writes
+**Untested.** This path assumes the car's built-in Grok ("Ara") has a tool that can create files in GitHub. That is
+**unverified**, and no `ara-…` result has appeared in the inbox yet. If it works, when you say **"post it"**, she writes
 `inbox/ara-<YYYYMMDDTHHMMSS>-<slug>.json` to the `inbox` branch of `mogesjohnson/post-it-board`, and the
 workflow pins it. Instructions she can follow: **[docs/ara-instructions.md](docs/ara-instructions.md)**.
 
-This costs nothing extra, keeps all of the car's Grok features (navigation, car controls), and works today. On its
+If it works, this costs nothing extra and keeps all of the car's Grok features (navigation, car controls). On its
 own, its weakness is that **if you forget to say "post it", nothing is saved**. Path 1 covers that. The automation
 skips the parts of a conversation Ara already posted, so you don't get two pages
 ([details](docs/transcript-automation.md#6-idempotency-and-dedup)).
@@ -188,12 +194,14 @@ and the text, with no audio capture at all. The legacy app solved the same probl
 |---|---|---|
 | Inbox workflow (post-it-board Actions) | Encrypted repo secrets for the Supabase bot sign-in | — |
 | 1. Transcript automation | A **fine-grained GitHub PAT**: only `mogesjohnson/post-it-board`, **Contents: read and write**, ≤ 90-day expiry. Plus whatever the transcript reader needs (e.g. a signed-in Grok session for browser automation, which is sensitive) | Supabase credentials, `service_role` key |
-| 2. Ara "post it" | Her own GitHub tool access | Supabase credentials |
+| 2. Ara "post it" | Her own GitHub tool access (unverified, see [risks](docs/risks.md)) | Supabase credentials |
 | Legacy Android app | GitHub PAT + xAI key in Keystore-backed storage on the phone ([details](docs/architecture.md#secrets-model-legacy-app)) | Supabase credentials |
 
-If the GitHub token leaks, the worst case is someone pushing files to post-it-board (posting or deleting notes via the
-inbox, or changing the site on `main`). Revoke it in one click and revert with git. Store tokens in the runner's
-secret store, never in any repo.
+If the GitHub token leaks, someone can push files to post-it-board: post or delete notes via the inbox, change the site
+on `main`, or change `main`'s `scripts/post.mjs`, which the inbox workflow runs with the Supabase bot secrets, to steal
+the bot password. **Protect `main` with a branch ruleset** that blocks direct pushes
+([setup-checklist.md](docs/setup-checklist.md) step 2). Revoke a leaked token in one click and revert with git. Store
+tokens in the runner's secret store, never in any repo.
 
 ## Status
 
@@ -201,7 +209,7 @@ secret store, never in any repo.
 |------|--------|
 | Board, Supabase, inbox workflow | ✅ live (post-it-board) |
 | 1. Transcript automation | 📄 designed ([transcript-automation](docs/transcript-automation.md)). **Transcript-reading method unverified**, not built yet |
-| 2. Ara pushes to inbox on "post it" | 📄 instructions written ([ara-instructions](docs/ara-instructions.md)) |
+| 2. Ara pushes to inbox on "post it" | 📄 instructions written ([ara-instructions](docs/ara-instructions.md)). **Untested:** Ara's GitHub access is unverified |
 | Legacy Android voice app | 🗄️ superseded. Spec + generation prompt kept ([ai-studio-prompt](docs/ai-studio-prompt.md)), not built |
 
 ## License

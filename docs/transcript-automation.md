@@ -73,7 +73,7 @@ and the recommendation in [§2.5](#25-recommendation).
 | **B. Grok Automation** ([announcement](https://x.ai/news/grok-automations)) | A scheduled Grok Automation is told: "find today's car conversations that aren't on the board yet, summarize them, push inbox files". | Runs inside your Grok account, nothing to host, Grok does the summary itself | **Unverified** whether an Automation can read your *other* conversations, and whether it has a GitHub connector that can write files. The announced schedules are once, daily, weekdays, weekly, monthly or yearly, so this is an **end-of-day sweep**, not silence detection |
 | **C1. REST reads with your grok.com session** | A small script on an always-on machine calls the same **undocumented, same-origin** JSON endpoints grok.com's own web page uses (list conversations, then load one conversation's messages), sending your grok.com session cookies. | Cheap and fast: one small JSON request per poll, so it can poll every few seconds. Exact timestamps from JSON, no page parsing | **Private, undocumented endpoints** that xAI can change or lock down anytime. A session cookie is **full access to your Grok account**. Anti-bot challenges, cookie expiry, and xAI's terms ([§2.3](#23-what-xais-terms-say)) are real risks |
 | **C2. Browser automation of grok.com** | A real browser (Playwright, Puppeteer, or a tool such as Reduck) with a **persistent profile** signed in as you opens grok.com, then reads the conversation list and transcript, either by calling the same endpoints from inside the page or by reading the rendered page. | Behaves like you using the site; the browser keeps its own cookies fresh; can still work when direct requests get challenged | Heavier and slower (seconds per read, hundreds of MB of memory). Breaks when the page layout changes (if it reads the DOM). Same account-access and terms risks as C1 |
-| **D. Ara posts it herself** | No reader at all: you say "post it" (or tell Ara in her instructions to post at the natural end of each conversation). | Already works (the second path), no extra moving parts, fully within the product | Not automatic if you forget. "Post at the end" is unreliable because Ara doesn't know when you are done, and asking her to post after every answer floods the board |
+| **D. Ara posts it herself** | No reader at all: you say "post it" (or tell Ara in her instructions to post at the natural end of each conversation). | No extra moving parts, fully within the product. **Untested:** assumes Ara can create files in GitHub | Not automatic if you forget. "Post at the end" is unreliable because Ara doesn't know when you are done, and asking her to post after every answer floods the board |
 
 ### 2.2 What the research found (verified vs reported)
 
@@ -164,7 +164,7 @@ keep GitHub only for applying inbox files.
   and a `READER=rest|browser` switch, so switching is a config change, not a rewrite. A health check
   ([§7](#7-failure-modes)) should **alert on auth failure, a challenge page, or a schema change** (e.g. expected
   fields missing) and can auto-fail over from `rest` to `browser`.
-- **Keep D (Ara's "post it") as the always-available manual path**, and **A (manual export)** for an occasional
+- **Keep D (Ara's "post it") as the manual path** once it's tested (it assumes Ara can write to GitHub), and **A (manual export)** for an occasional
   backfill. **B (Grok Automation)** only if it turns out it can read other conversations and write to GitHub.
 - **Honesty, unchanged:** the endpoints are undocumented and unsupported, whether *voice/car* conversations return
   transcript text through them is **unverified** (test it first -- setup step 4), and automated access of grok.com is
@@ -301,8 +301,9 @@ loop forever:
     s    = summarize(msgs)                                # {pin, title, body}
     name = "auto-" + hash10(conv.id) + "-" + fmt_utc(last.ts, "YYYYMMDDTHHMMSSZ") + ".json"
     if st.board:
-      cmd = {op: "edit", target: "page", date: st.board.date,
-             pin: st.board.pinTitle, page: st.board.pageTitle, body: s.body}
+      cmd = {op: "edit", target: "page", date: st.board.date, pin: st.board.pinTitle, body: s.body}
+      if st.board.pageTitle: cmd.page = st.board.pageTitle          # exact title: safer, numbers can shift
+      else: cmd.pageNumber = st.board.pageNumber                    # e.g. after skipped_duplicate
     else:
       cmd = {op: "add", date: ny_date(msgs[0].ts), pin: s.pin, title: s.title, body: s.body}
 
@@ -319,9 +320,11 @@ check_result(st):
     return
   switch r.status:
     "ok", "skipped_duplicate":
+      prev = st.board                                     # null on the first add
       st.board = {date: r.date, pinTitle: r.matched.pinTitle,
-                  pageTitle: (st.board ? st.board.pageTitle : r.input.title),
-                  pageNumber: r.pageNumber or st.board.pageNumber}
+                  pageTitle: prev ? prev.pageTitle
+                           : (r.status == "ok" ? r.input.title : null),   # a duplicate's page may have another title
+                  pageNumber: r.pageNumber or (prev ? prev.pageNumber : null)}
       st.lastPostedTs = st.pending.lastTs; st.status = "posted"
     "skipped_not_found" when st.pending.op == "edit":    # page was deleted or renamed by hand
       st.board = null                                     # next quiet period sends a fresh add
@@ -342,11 +345,15 @@ check_result(st):
 - **Rules for the summary**
   - plain text, key points only, `\n` for line breaks;
   - leave out anything personal or sensitive: **the board and the repo are public**;
+  - the text also stays in the public repo's `inbox` branch history (command and result files), even after the note
+    is deleted from the board. Only a history rewrite of that branch removes it;
   - `pin` ≤ 200 characters, `title` ≤ 200, `body` ≤ 5000 (`post.mjs` rejects longer values with `error_invalid`).
 - **Page title:** make it unique and stable, e.g. `Drive 9:15 PM` (the conversation's start time in New York).
   Later edits find the page by this exact title.
-- **Pin:** reuse a topic from earlier the same day when it's the same subject. `add` matches pins loosely, so
-  "garage shelves" lands on "Garage Shelves".
+- **Pin:** when it's the same subject as a note from earlier the same day, reuse that pin's **exact** title (keep the
+  titles you've posted in state). `add` ignores case, spaces and punctuation, so "garage shelves" lands on
+  "Garage Shelves", but it tolerates typos only inside longer words (5+ letters, same first letter), so short
+  different words like "Code" and "Node" become separate pins.
 
 ### 4.2 Command JSON (exactly what `post.mjs` accepts)
 
@@ -389,7 +396,7 @@ and `date`. Full format: [post-it-board inbox/README.md](https://github.com/moge
 | status | what the automation does |
 |---|---|
 | `ok` | record `board` and `lastPostedTs` |
-| `skipped_duplicate` | same text already on that pin in the last 10 min: treat as posted |
+| `skipped_duplicate` | same text already on that pin in the last 10 min: treat as posted. post-it-board is being updated so this result also reports the existing page's `pageNumber` (with `matched.pageId`). That page may have a different title (e.g. Ara posted it), so don't assume `input.title`: edit it by `pageNumber`, or read its real title from the board by `matched.pageId` |
 | `skipped_ambiguous` | the topic could match several pins: alert, then retry `add` with the exact title from `candidates` |
 | `skipped_not_found` | an edit found no page (you deleted or renamed it): forget `board`, post a fresh `add` |
 | `error_invalid` | bug in the command (too long, wrong field): alert; don't retry the same file |
@@ -417,8 +424,9 @@ and `date`. Full format: [post-it-board inbox/README.md](https://github.com/moge
   Store it in the runner's secret store (OS keychain, environment of a service account, or an Actions secret if
   the runner is a private workflow), never in a file in any repo.
   - Fine-grained tokens can't be limited to one branch, so this token could also push to `main` (the site code).
-    Optional hardening: a branch ruleset on post-it-board's `main` that blocks direct pushes, with a bypass for you
-    as admin.
+    The inbox workflow runs `main`'s `scripts/post.mjs` with the Supabase bot secrets, so a leaked token could rewrite
+    it to steal the bot password. **Protect `main` with a branch ruleset** that blocks direct pushes, with an admin
+    bypass set to *for pull requests only* (the token acts as you); see [setup-checklist.md](setup-checklist.md) step 2.
 
 ## 5. How it fits with the inbox workflow and its secrets
 
