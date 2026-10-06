@@ -1,4 +1,4 @@
-# Main plan for workflow - same name pinned on the Grok app for the chat
+# Documentation - redirection to the specific chat that's pinned in Grok that talks about this whole workflow and our thoughts on it and how we put it all together, and the whole transcription is there
 
 This page explains the project in plain language. If you're new to this repo, start here. The other docs go deeper on each part, and they're linked along the way.
 
