@@ -59,32 +59,117 @@ Things to check on your own phone before you build (see [setup-checklist.md](set
 ## 2. Reading the transcript (UNVERIFIED, choose one)
 
 The automation needs one small adapter, `listRecentConversations()` + `getMessages(conversationId)`, that returns
-messages with role, text and timestamp. **None of the options below is a confirmed, supported live feed of your
-Grok history.** Evaluate them in this order:
+messages with role, text and timestamp. **None of the options below is a documented, supported, public feed of
+your Grok history.** What research on Oct 5, 2026 actually found is in
+[§2.2](#22-what-the-research-found-verified-vs-reported); xAI's terms are in [§2.3](#23-what-xais-terms-say); the
+detailed comparison of the two realistic readers is in [§2.4](#24-rest-reads-vs-browser-automation-for-this-use-case),
+and the recommendation in [§2.5](#25-recommendation).
+
+### 2.1 The options at a glance
 
 | Option | How it would work | Pros | Cons / unknowns |
 |---|---|---|---|
-| **A. Official API or export** | Use an official xAI endpoint for consumer history, *if one appears*. Today the only official route we know of is the account **data download** (grok.com → Settings → Data Controls), which produces a ZIP snapshot you request by hand. | Supported, stable format, no scraping | No known live API. The export is a **manual, after-the-fact snapshot**: fine for a backfill or a nightly catch-up, useless for an 8-second threshold. Format can change without notice |
+| **A. Official API or export** | Use an official xAI endpoint for consumer history, *if one appears*. Today the only official route we know of is the account **data download** (grok.com -> Settings -> Data Controls), which produces a ZIP snapshot you request by hand. | Supported, stable format, no scraping | No known live API. The export is a **manual, after-the-fact snapshot**: fine for a backfill or a nightly catch-up, useless for an 8-second threshold. Format can change without notice |
 | **B. Grok Automation** ([announcement](https://x.ai/news/grok-automations)) | A scheduled Grok Automation is told: "find today's car conversations that aren't on the board yet, summarize them, push inbox files". | Runs inside your Grok account, nothing to host, Grok does the summary itself | **Unverified** whether an Automation can read your *other* conversations, and whether it has a GitHub connector that can write files. The announced schedules are once, daily, weekdays, weekly, monthly or yearly, so this is an **end-of-day sweep**, not silence detection |
-| **C. Browser automation of grok.com** | A headless browser (Playwright, Puppeteer…) on an always-on machine, signed in **as you**, opens grok.com history, reads the newest conversations and their timestamps. | The only option here that can poll every few seconds to a minute; full control over the loop | Fragile (breaks when the page layout changes). Needs a long-lived signed-in session, which is effectively **full access to your Grok account** and must be guarded like a password. Session expiry, 2FA and bot detection can stop it. Check xAI's terms of service before relying on it. Polling too often may be rate limited or flagged |
-| **D. Ara posts it herself** | No reader at all: you say "post it" (or tell Ara in her instructions to post at the natural end of each conversation). | Already works (the second path), no extra moving parts | Not automatic if you forget. "Post at the end" is unreliable because Ara doesn't know when you are done, and asking her to post after every answer floods the board |
+| **C1. REST reads with your grok.com session** | A small script on an always-on machine calls the same **undocumented, same-origin** JSON endpoints grok.com's own web page uses (list conversations, then load one conversation's messages), sending your grok.com session cookies. | Cheap and fast: one small JSON request per poll, so it can poll every few seconds. Exact timestamps from JSON, no page parsing | **Private, undocumented endpoints** that xAI can change or lock down anytime. A session cookie is **full access to your Grok account**. Anti-bot challenges, cookie expiry, and xAI's terms ([§2.3](#23-what-xais-terms-say)) are real risks |
+| **C2. Browser automation of grok.com** | A real browser (Playwright, Puppeteer, or a tool such as Reduck) with a **persistent profile** signed in as you opens grok.com, then reads the conversation list and transcript, either by calling the same endpoints from inside the page or by reading the rendered page. | Behaves like you using the site; the browser keeps its own cookies fresh; can still work when direct requests get challenged | Heavier and slower (seconds per read, hundreds of MB of memory). Breaks when the page layout changes (if it reads the DOM). Same account-access and terms risks as C1 |
+| **D. Ara posts it herself** | No reader at all: you say "post it" (or tell Ara in her instructions to post at the natural end of each conversation). | Already works (the second path), no extra moving parts, fully within the product | Not automatic if you forget. "Post at the end" is unreliable because Ara doesn't know when you are done, and asking her to post after every answer floods the board |
 
-**Recommendation:** start with **D** (it works today) plus a **daily catch-up** via **A** or **B** if either turns
-out to be able to read history. Build **C** only if you really want near-real-time auto-posting, and accept its
-fragility and the account-access risk. Whatever you choose, keep it behind the adapter interface so the rest of
-the loop doesn't change.
+### 2.2 What the research found (verified vs reported)
 
-**How often can it poll?** That depends entirely on the option:
+Checked on Oct 5, 2026 with read-only GitHub queries and public web pages. **No grok.com endpoint was called** (with
+or without credentials), so nothing here proves these endpoints work for *your* account or for *car* conversations.
 
-| Runner | Realistic poll interval | What "8 s threshold" means in practice |
+| Claim | Status | Evidence |
 |---|---|---|
-| Always-on machine running option C | 15–60 s (be gentle) | Posted roughly 8 s + up to one poll interval + ~1 min for the Action after you stop |
-| **GitHub Actions `schedule` (cron)** | **every 5 minutes at best.** GitHub doesn't allow scheduled workflows more often than that, and runs can start late when GitHub is busy | **"At least 8 s of silence, noticed at the next run"**: typically 5–10 minutes after you stop, sometimes more |
-| Grok Automation (option B) | about once a day | An end-of-day sweep: the threshold hardly matters |
-| Data export (option A) | whenever you request one | Manual backfill only |
+| grok.com's web app uses `GET https://grok.com/rest/app-chat/conversations` (list) and `POST https://grok.com/rest/app-chat/conversations/{id}/load-responses` (message bodies) | **Verified in third-party source code**, not in any xAI documentation | [pinguarmy/ai-chat-exporter `src/lib/grok-api.ts`](https://github.com/pinguarmy/ai-chat-exporter/blob/main/src/lib/grok-api.ts) calls the list with `pageSize`/`pageToken`, then `conversations_v2/{id}`, then `conversations/{id}/response-node` (to get `responseIds`), then `POST .../load-responses` with body `{"responseIds": [...]}`. [0xSMW/swift-grok `GrokClient+Conversations.swift`](https://github.com/0xSMW/swift-grok/blob/main/Sources/GrokClient/Endpoints/GrokClient%2BConversations.swift) does the same list, `response-node` and `load-responses` calls |
+| Fields useful for silence detection | **Verified in source code** (field names only; not checked against a live response) | List items carry `conversationId`, `title`, `createTime`, `modifyTime` (swift-grok `ConversationModels.swift`; xAI's own grok-build reads the same, below). Loaded responses carry `responseId`, `message`, `sender`, `createTime` (swift-grok `Response` model; ai-chat-exporter reads `sender` and `createTime`) |
+| Auth = your grok.com session cookies | **Verified in source code** | ai-chat-exporter is a browser extension that calls the endpoints from the grok.com page with `credentials: 'include'` (the browser attaches your cookies). swift-grok sends a `Cookie` header and requires at least one of `sso`, `sso-rw`, `x-userid`, `x-anonuserid`; its cookie extractor also collects optional `x-challenge`, `x-signature`, `cf_clearance`, `__cf_bm`, and the client sends an `x-statsig-id` header plus browser-like headers |
+| "xai-org/swift-grok" is an official xAI repo | **False** | `xai-org/swift-grok` does not exist (GitHub 404). The Swift client is [0xSMW/swift-grok](https://github.com/0xSMW/swift-grok) (`klu-ai/swift-grok` redirects there), which its own author labels an *"unofficial grok api library"*; MIT, ~22 stars, last commit Aug 17, 2026. The real [xai-org](https://github.com/xai-org) org lists no swift-grok |
+| pinguarmy/ai-chat-exporter exists and covers Grok | **Verified** | [Repo](https://github.com/pinguarmy/ai-chat-exporter): TypeScript browser extension (Chrome/Firefox/Edge), MIT, ~11 stars, last commit Oct 2, 2026. It's an on-demand exporter in your open browser, not a headless poller |
+| xAI's **own** open-source code calls the list endpoint | **Verified** (interesting signal, not a public API) | xAI's [grok-build](https://github.com/xai-org/grok-build) CLI has [`conversations_client.rs`](https://github.com/xai-org/grok-build/blob/main/crates/codegen/xai-grok-shell/src/remote/conversations_client.rs) calling `GET {base}/rest/app-chat/conversations` (default base `https://grok.com`) with an **OAuth bearer token**, not cookies; its login config requests scopes including `conversations:read`. That client only lists/renames/stars/deletes conversations; it does not load message bodies. It hints a token route may exist, but it's undocumented for third parties. **Don't borrow grok-build's login or tokens for this project**; watch for xAI documenting it |
+| Car **voice** conversations return transcript text through these endpoints | **Unverified, with a warning sign** | The archiver [dotCipher/ai-vault](https://github.com/dotCipher/ai-vault/blob/3dde18d2/src/providers/grok-web/index.ts) notes under *KNOWN LIMITATIONS*: *"Voice conversations: Audio files are not accessible through the web interface or API. Only metadata (title, timestamps) can be archived."* Whether that applies to Tesla conversations (which you see as text in the app) is unknown. **Test this first** (setup step 4) |
+| Reduck automates grok.com with saved cookies in a hosted or local browser | **Partly verified** | [reduck.ai](https://reduck.ai/) and [docs.reduck.ai](https://docs.reduck.ai/) say scripts run *"in your own Chrome, through our extension"* using your logged-in state, and are also callable by REST API or cron. The pricing table says local runs *"Needs your device on"*, and the cloud browser is *"Auth-based sites coming soon with connectors"*, so **hosted runs using your grok.com login are not offered there today**. A specific Reduck Grok transcript script (reported as `reduck/grok.com/get_chat_messages`) **could not be verified**: no public page was found. Reduck also advertises *"Work behind logins and bypass anti-bot"* -- do not point that at grok.com (see §2.3) |
+| GitHub Actions cron can't run more often than every 5 minutes | **Verified** | [GitHub docs](https://docs.github.com/en/actions/reference/workflows-and-actions/events-that-trigger-workflows#schedule): *"The shortest interval you can run scheduled workflows is once every 5 minutes."* and *"The `schedule` event can be delayed during periods of high loads of GitHub Actions workflow runs."* |
+| Datacenter IPs (Actions runners, cloud VMs) trip grok.com challenges more often | **Unverified** (plausible; commonly reported for Cloudflare-fronted sites) | swift-grok's optional `cf_clearance` / `__cf_bm` cookies indicate Cloudflare sits in front of grok.com |
 
-So the 8 s number is **a minimum quiet time, not a posting deadline**. The automation never posts a conversation
-that has had less than the threshold of silence, but it can post much later than 8 s.
+### 2.3 What xAI's terms say
+
+Quoted from the pages as fetched on Oct 5, 2026. **Read them yourself before building C1 or C2.** This is not legal advice.
+
+From the [Acceptable Use Policy](https://x.ai/legal/acceptable-use-policy) (effective Aug 14, 2026), which the
+consumer terms make binding. The AUP prohibits, among other things:
+
+> - *"Accessing the Services through unauthorized automated or non-human means, whether through a bot, script, or otherwise"*
+> - *"Scraping, harvesting or reselling any Input or Output, or distilling model data or Outputs"*
+> - *"...using bots to access, reverse engineer, decompile, disassemble or otherwise seek to obtain the source code of our Service..."*
+> - *"Disrupting, interfering with, or unauthorized access to the Service or its safety systems, including circumventing any rate limits or restrictions or protective measures and safety mitigations"*
+
+and warns: *"Violating our policies could result in action against your account, up to suspension or termination."*
+
+From the [consumer Terms of Service](https://x.ai/legal/terms-of-service) (last updated Sep 11, 2026):
+
+> - *"You may not share your account credentials or make your account available to anyone else, and are responsible for all activities that occur under your account."*
+> - *"At our sole discretion, we may implement rate limitations to accommodate system resources or usage needs."*
+
+What this means here:
+
+- **Both C1 and C2 are automated access by a script or bot.** On a plain reading the AUP does not authorize either,
+  even for your own conversations, and using a browser does not make C2 more acceptable than C1. The realistic
+  downside is **action against your account (up to suspension)**, not just breakage.
+- **Never bypass protections.** If grok.com returns a challenge, CAPTCHA or rate limit, **stop and alert** -- don't
+  solve it automatically, rotate IPs, or reach for "anti-bot bypass" features.
+- If you proceed anyway, stay as gentle as possible: **your own account only, read-only, low poll rate, no parallel
+  requests**, honour `429`/`Retry-After`, and never hand the session to a third-party service. Only Ara's "post it"
+  (option D) and the manual data export (option A) are clearly inside the product as designed.
+
+### 2.4 REST reads vs browser automation for this use case
+
+The job: every few seconds, check the newest timestamp of the most recent car conversation, decide whether it has
+been quiet for 8+ seconds, then load that one conversation, summarize it, and push one inbox JSON file.
+
+| Dimension | **C1. REST reads (session cookies)** | **C2. Browser automation (persistent profile)** |
+|---|---|---|
+| **Reliability** | High *while* the endpoints and cookie stay valid; a single HTTP call with little to parse. Breaks instantly if xAI changes the endpoint, the auth, or adds a challenge | More robust to small endpoint tweaks if it reads the rendered page; but DOM scraping breaks on layout changes, and the browser itself (updates, memory, crashes) is one more thing that fails |
+| **Auth & where the secret lives** | Your grok.com **session cookies** (`sso`, `sso-rw`, etc.), stored only on the poller machine (file with `600` perms, OS keychain, or an **encrypted** secret). A cookie is **full account access** | A **persistent browser profile** logged in as you, on the poller machine. The whole profile directory is the secret and is **full account access**. The browser refreshes the cookie itself, so it survives rotation better |
+| **Cookie expiry / rotation** | Cookies expire or get invalidated; you must re-extract and re-inject them by hand when that happens (health check flags it) | The signed-in browser renews cookies as it's used, so it needs manual re-login less often |
+| **Anti-bot / Cloudflare / 2FA** | A bare client is the **most likely to be challenged**, especially from a datacenter IP; it can't solve a challenge and shouldn't try | A real browser with your fingerprint and residential IP is **less likely to be challenged**; still can't (and must not) bypass one. 2FA / Google sign-in happens once when you log the profile in |
+| **Rate limits / breakage if xAI changes things** | Cheap enough to stay well under any limit at a low poll rate; **brittle** to endpoint or schema changes (mitigate with the health check in [§7](#7-failure-modes)) | Same exposure to endpoint changes if it calls them in-page; if it reads the DOM, it survives API changes but breaks on UI changes |
+| **Latency** | Sub-second per poll; silence is noticed within about one poll interval | Seconds per read (page load / render); detection is coarser and slower |
+| **Resource usage** | Tiny: a cron-like script, a few MB | Heavy: a full Chrome, hundreds of MB of RAM, more CPU; needs a display or headless setup |
+| **Headless / scheduled operation** | Runs fine as a background service on an always-on machine or the box. **Poor fit for GitHub Actions cron**: 5-minute minimum ([verified](#22-what-the-research-found-verified-vs-reported)) defeats an 8 s threshold, and datacenter IPs are the most likely to be challenged | Can run headless on an always-on machine; even worse on GitHub Actions (no persistent profile, datacenter IP, heavy) |
+| **Legal / ToS** | Automated script access; see [§2.3](#23-what-xais-terms-say) | Also automated access; a browser doesn't make it sanctioned. "Bypass anti-bot" tooling makes it worse |
+
+**Why not GitHub Actions cron for the reader.** Even though the *inbox workflow* runs on GitHub, the **reader** should
+not: cron's 5-minute floor makes "8 s of silence" meaningless (you'd detect it minutes later), runs can be delayed
+under load, there's no persistent browser profile, and datacenter IPs are the most likely to hit grok.com
+challenges. Run the reader on an **always-on machine you control** (a home server, a Raspberry Pi, or this box) and
+keep GitHub only for applying inbox files.
+
+### 2.5 Recommendation
+
+- **Primary: C1, REST reads with your grok.com session, on an always-on machine you control.** It's the only option
+  that can honour a few-second silence threshold cheaply. Concretely:
+  - **Poll the conversation list cheaply** (`GET /rest/app-chat/conversations?pageSize=…`) every **5-10 s only while
+    a recent car conversation looks active**, and back off to every few minutes when nothing is changing.
+  - **Load message bodies only when a conversation changed** (its `modifyTime` / newest timestamp advanced), via
+    `response-node` + `load-responses` -- never on every poll.
+  - Keep the session cookie **only** on that machine (file with strict perms, OS keychain, or an encrypted secret).
+    **Never** put it in this public repo, in any inbox file, or in chat.
+  - Treat the endpoints as private and unstable, run read-only, your own account only, and honour `429`s.
+- **Fallback: C2, browser automation with a persistent signed-in profile**, used **when C1 breaks or gets
+  challenged** -- cookie expired, a Cloudflare/anti-bot challenge, or a schema change. The browser keeps its own
+  session fresh and looks more like a human session, at the cost of speed and resources.
+- **Make the reader a feature flag.** Put both behind the same `listRecentConversations()` / `getMessages()` adapter
+  and a `READER=rest|browser` switch, so switching is a config change, not a rewrite. A health check
+  ([§7](#7-failure-modes)) should **alert on auth failure, a challenge page, or a schema change** (e.g. expected
+  fields missing) and can auto-fail over from `rest` to `browser`.
+- **Keep D (Ara's "post it") as the always-available manual path**, and **A (manual export)** for an occasional
+  backfill. **B (Grok Automation)** only if it turns out it can read other conversations and write to GitHub.
+- **Honesty, unchanged:** the endpoints are undocumented and unsupported, whether *voice/car* conversations return
+  transcript text through them is **unverified** (test it first -- setup step 4), and automated access of grok.com is
+  in tension with xAI's AUP ([§2.3](#23-what-xais-terms-say)). If you're not comfortable with the account risk, use
+  D + A only. **Don't** build on xAI's internal grok-build OAuth or borrow its tokens.
 
 ## 3. The silence-detection loop
 
@@ -97,6 +182,7 @@ Keep one small record per conversation, in a local file or tiny database on the 
 | `conversationId` | ID from the reader (never published; only its hash goes into file names) |
 | `convKey` | first 10 hex characters of `sha256(conversationId)`, safe to put in public file names |
 | `lastSeenTs` | timestamp of the newest message seen on the previous poll (UTC) |
+| `lastLoadedModify` | the conversation's `modifyTime` the last time bodies were loaded, so unchanged conversations skip the costly load |
 | `firstSeenAt` | **local clock** time when that newest message was first noticed |
 | `lastPostedTs` | timestamp of the newest message that is already included in a pushed summary |
 | `pending` | `{file, lastTs, op}` for a pushed command whose result hasn't been read yet |
@@ -164,9 +250,11 @@ This is pseudocode, not a runnable script. `reader` is the unverified adapter fr
 
 ```text
 CONFIG
+  reader           = "rest"    # "rest" (C1, primary) or "browser" (C2, fallback) -- same adapter
   thresholdSec     = 8         # clamp to 5..30
   userTurnGraceSec = 60        # extra wait when the newest message is yours
-  pollSec          = 30        # whatever your reader allows; GitHub cron: >= 300
+  activePollSec    = 7         # poll the list this often WHILE a car conversation looks active (5-10 s)
+  idlePollSec      = 180       # back off to this when nothing is changing
   lookbackHours    = 12        # how far back to look for conversations
   repo = "mogesjohnson/post-it-board", branch = "inbox"
   optOutPhrases    = ["don't post this", "do not post", "off the record"]
@@ -174,15 +262,22 @@ CONFIG
 loop forever:
   now = utc_now()                                         # NTP-synced clock
   try:
-    convs = reader.listRecentConversations(since = now - lookbackHours)
-  except ReadError as e:
-    alert_once("transcript read failed", e); sleep(backoff()); continue
+    convs = reader.listRecentConversations(since = now - lookbackHours)   # cheap list poll; see section 2.5
+  except AuthError as e:   health.fail("auth", e);      maybe_failover(); sleep(backoff()); continue
+  except ChallengeError as e: health.fail("challenge", e); sleep(long_backoff()); continue   # never bypass
+  except SchemaError as e: health.fail("schema", e);    maybe_failover(); sleep(backoff()); continue
+  except ReadError as e:   health.fail("read", e);      sleep(backoff()); continue
+  health.ok()
+  any_active = false
 
   for conv in convs:
     if not looks_like_car_conversation(conv): continue
-    msgs = reader.getMessages(conv.id)                    # [{role, text, ts}] -> ts in UTC
+    st = state.load(conv.id) or rebuild_from_results(hash10(conv.id))
+    if conv.modifyTime <= st.lastLoadedModify and not st.pending: continue   # nothing new: skip the costly load
+    any_active = true                                     # something changed -> poll fast next time
+    msgs = reader.getMessages(conv.id)                    # load bodies ONLY when the conversation changed
+    st.lastLoadedModify = conv.modifyTime
     if msgs is empty: continue
-    st   = state.load(conv.id) or rebuild_from_results(hash10(conv.id))
     last = msgs[-1]
 
     if st.pending: check_result(st); continue             # wait for the Action first
@@ -215,7 +310,7 @@ loop forever:
     st.pending = {file: name, lastTs: last.ts, op: cmd.op}; st.status = "posting"
     state.save(st)
 
-  sleep(pollSec)
+  sleep(any_active ? activePollSec : idlePollSec)
 
 check_result(st):
   r = get_file(repo, branch, "inbox/results/" + st.pending.file)   # 404 -> not processed yet
@@ -240,7 +335,7 @@ check_result(st):
 ### 4.1 Summary
 
 - **Input:** the full conversation (both sides). **Output:** `pin` (1–4 word topic), `title`, and `body`.
-- **Who summarizes** depends on the reader: with option B, Grok does it inside the Automation; with option C you
+- **Who summarizes** depends on the reader: with option B, Grok does it inside the Automation; with the REST/browser reader (C1/C2) you
   need a model. That can be an LLM API you already pay for (xAI text API, Gemini, …) or a local model. This path
   needs **no xAI realtime voice API key**. A text-model key is needed only if your reader can't summarize by itself.
 - **Fallback:** if summarization fails, post the last few turns as-is (trimmed to the limits) rather than nothing.
@@ -360,7 +455,7 @@ sequenceDiagram
   `SUPABASE_OWNER_EMAIL` and `SUPABASE_OWNER_PASSWORD`. Runs are serialized by a concurrency group, so commands
   from Ara and the automation never race each other in the database.
 - **The automation never holds Supabase credentials.** It only holds the GitHub token, plus whatever the reader
-  needs (for option C, a signed-in Grok session). Only the Action can sign in to Supabase, and RLS only lets
+  needs (for C1 a grok.com session cookie, for C2 a signed-in browser profile -- either one is full Grok account access). Only the Action can sign in to Supabase, and RLS only lets
   accounts listed in `public.board_owners` write. The anon key stays read-only by design, and no `service_role`
   key is used anywhere.
 - Results are public (the repo is public), but they contain only note text that the board shows publicly anyway.
@@ -397,10 +492,11 @@ implement it in `ara_already_posted()`:
 |---|---|---|
 | **Automation not running** (machine asleep, crashed, laptop closed) | Nothing posted after a drive | State is based on `lastPostedTs`, so when it comes back it catches up on every conversation inside `lookbackHours`. Add a **daily catch-up** with a longer lookback, plus a heartbeat alert if no poll happened for a long time. Conversations you delete from Grok history before the catch-up are lost |
 | **Poll gap** (cron delayed, long poll interval) | Note posted minutes late | Expected: the threshold is a minimum quiet time, not a deadline. GitHub cron can't run more often than every 5 minutes and may start late |
-| **Transcript read failure** (page layout changed, export format changed, no access) | Reader errors, nothing posted | Alert once per failure type, back off, keep retrying. Since conversations stay in history, a later successful read still catches up. This is the **most likely** failure for option C |
+| **Transcript read failure / schema change** (endpoint changed, fields missing, page layout changed) | Reader errors or returns nothing | **Health check** ([below](#health-check-and-reader-failover)): alert once per failure type, back off, keep retrying. Since conversations stay in history, a later successful read catches up. The **most likely** failure for C1; the `READER` flag can fail over to C2 |
+| **Anti-bot / challenge page** (Cloudflare, CAPTCHA, rate notice from grok.com) | A challenge/HTML instead of JSON, or an unusual status | **Stop and alert. Never auto-solve, rotate IPs, or bypass** ([§2.3](#23-what-xais-terms-say)). Optionally fail over `rest`->`browser`, which is less likely to be challenged, and lengthen the poll interval |
 | **Partial transcript** (sync not finished yet) | Summary missing the last turns | The conversation goes back to Active when more messages arrive, and the next quiet period sends an **edit** with the full summary |
-| **Auth expiry** (Grok session signed out, 2FA prompt, GitHub token expired or revoked) | Read fails / GitHub returns 401 or 403 | Alert ("sign in again" / "renew token"). Keep unposted state; nothing is lost while it waits. Calendar reminder before the token's expiry |
-| **Rate limits** (Grok side unknown; GitHub REST: about 5,000 requests per hour per token, plus secondary limits on rapid writes) | 429 / 403 with retry headers | Poll gently, back off exponentially, honour `Retry-After`. One push per finished conversation is far below GitHub's limits |
+| **Auth expiry** (grok.com cookie/profile expired, 2FA prompt, GitHub token expired or revoked) | Read fails / `401`/`403`; for C1 the cookie needs re-extracting, for C2 the profile needs re-login | Alert ("sign in to Grok again" / "renew token"). Keep unposted state; nothing is lost while it waits. The signed-in **browser profile (C2) renews cookies on its own**, so it needs manual re-login less often than raw cookies (C1). Calendar reminder before the GitHub token expires |
+| **Rate limits** (grok.com limits undocumented and may be enforced "at our sole discretion"; GitHub REST: ~5,000 requests/hour per token plus secondary write limits) | `429`/`403` with retry headers | Poll gently (list cheaply only while active, back off when idle), never run parallel reads, honour `Retry-After`. One inbox push per finished conversation is far below GitHub's limits |
 | **GitHub push failure** (network, 409/422 because the Action pushed at the same moment) | PUT fails | Retry *push if absent* with backoff. The name is deterministic, so retries can't duplicate |
 | **Action failure** (`error` in `inbox/results/<name>.json`, or a red run in the post-it-board Actions tab) | Result `error`, or no result at all after ~10 min | The workflow **keeps** the command file on `error`. Fix the cause (e.g. bot password rotated without updating the secret) and re-run the workflow (it has `workflow_dispatch`). The automation alerts if no result appears |
 | **Bad command** (`error_invalid`) | Result `error_invalid` | A bug in the automation (usually length limits). Alert; don't retry the same file |
@@ -413,12 +509,28 @@ has synced to your Grok account, so a weak signal on the road only delays when a
 lose the post, and there's no local queue on the phone to manage. (Ara herself still needs a connection to talk
 at all.) What does matter now is **read failures** on the automation's side.
 
+### Health check and reader failover
+
+Run a small **health check** on every poll (or every few polls) so a silent reader never goes unnoticed:
+
+- **Auth:** a `401`/`403`, a login redirect, or a cookie/profile that no longer returns JSON -> alert "sign in to
+  Grok again".
+- **Schema:** the list or message payload is missing fields the loop needs (`conversationId`, `modifyTime`,
+  `sender`, `createTime`, `message`) -> alert "grok.com response changed", and stop trusting parsed results.
+- **Challenge:** HTML / a Cloudflare or CAPTCHA page instead of JSON -> alert and **stop** (don't bypass).
+- **Heartbeat:** if no successful poll has happened for longer than N minutes -> alert "reader not running".
+
+Put the reader behind a **feature flag**, `READER=rest|browser` (both implement the same
+`listRecentConversations()` / `getMessages()` adapter). On an auth, schema or challenge failure the health check can
+**fail over from `rest` (C1) to `browser` (C2)** automatically and alert you, then fall back to `rest` once it
+recovers. See [§2.5](#25-recommendation).
+
 ## 8. What you still do by hand
 
 - **Once:** change the Supabase owner password, create the fine-grained token, choose and set up the reader, and
   check what the transcript looks like on your phone ([setup-checklist.md](setup-checklist.md)).
 - **After the first real drives:** tune the threshold (5–30 s, start at 8) and the "your turn" grace period.
-- **Ongoing:** sign the reader in again when its session expires (option C), renew the GitHub token before it
+- **Ongoing:** sign the reader in again when its session expires (re-extract the cookie for C1, re-login the browser profile for C2), renew the GitHub token before it
   expires, glance at the board and fix or delete a bad note, and act on alerts.
 - **When you want it pinned right now:** say "post it" to Ara, as before.
 - **When something is private:** say "don't post this" (or your chosen opt-out phrase) in the car.

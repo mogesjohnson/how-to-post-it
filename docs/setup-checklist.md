@@ -48,23 +48,39 @@ These answers decide how precise silence detection can be. See
 
 ## 4. Choose and set up the transcript reader
 
-**This is the unverified part.** We know of no public xAI/Grok API for reading consumer conversation history.
-Evaluate the options in [transcript-automation.md §2](transcript-automation.md#2-reading-the-transcript-unverified-choose-one):
+**This is the unverified part.** There is no public, documented xAI/Grok API for reading consumer conversation
+history. Research (Oct 5, 2026) found the grok.com web app's own undocumented `/rest/app-chat/` endpoints, used by
+third-party tools with your session cookies. Evaluate the options in [transcript-automation.md §2](transcript-automation.md#2-reading-the-transcript-unverified-choose-one):
 
+**Recommended (from [§2.5](transcript-automation.md#25-recommendation)):** primary = **C1, REST reads with your
+grok.com session**, on an always-on machine you control; fallback = **C2, browser automation with a persistent
+signed-in profile**. Keep both behind one `READER=rest|browser` flag. First, **read xAI's terms**
+([§2.3](transcript-automation.md#23-what-xais-terms-say)) and decide if you accept the account risk; if not, use D + A only.
+
+- [ ] **Test the key unknown first:** confirm a **car** conversation's **text** is actually readable (not just title +
+      timestamps). One archiver reports voice conversations expose only metadata. If car transcripts aren't readable,
+      none of C1/C2 help and you fall back to D.
+- [ ] **C1. REST reads (primary):** on an always-on machine, extract your grok.com session cookies and store them
+      **only** there (file with `600` perms, OS keychain, or an encrypted secret) — **never** in this repo, an inbox
+      file, or chat (a cookie is full account access). Poll the list every 5–10 s only while a conversation is active,
+      back off otherwise, load bodies only when a conversation changed, read-only, your own account only, honour 429s.
+- [ ] **C2. Browser automation (fallback):** a persistent browser profile logged in as you, for when C1 is challenged
+      or its cookie expires. Guard the whole profile directory like a password. Do **not** use "anti-bot bypass".
 - [ ] **A. Official API or export:** check grok.com → Settings → Data Controls and xAI's docs for anything newer than
-      the manual account-data ZIP. The ZIP alone is only good for a manual backfill.
+      the manual account-data ZIP (good only for a manual backfill).
 - [ ] **B. Grok Automation:** test whether a scheduled Automation can list your other conversations and push a file to
-      GitHub. If yes, use it as a daily catch-up.
-- [ ] **C. Browser automation of grok.com:** only if you want near-real-time posting. Run it on an always-on machine you
-      control, guard the signed-in session like a password, and check xAI's terms first.
+      GitHub; if so, use it as a daily catch-up.
 - [ ] **D. Ara posts it:** works today with no reader (step 6).
 
 Then:
 
 1. Implement the loop from [transcript-automation.md §3](transcript-automation.md#3-the-silence-detection-loop)
-   behind the reader adapter. Start in a **dry-run mode** that prints the command JSON instead of pushing it.
-2. Pick where it runs and its poll interval. GitHub Actions cron can't run more often than every 5 minutes.
-3. Set up an alert channel for read failures, auth expiry, missing results and `error` results.
+   behind the reader adapter, with the `READER` flag. Start in a **dry-run mode** that prints the command JSON
+   instead of pushing it.
+2. **Run the reader on an always-on machine you control, not GitHub Actions cron** (5-minute minimum defeats the 8 s
+   threshold, and datacenter IPs trip challenges). Keep GitHub only for applying inbox files.
+3. Wire up the **health check**: alert on auth failure, a challenge page, a schema change, missing results, `error`
+   results, and a missing heartbeat ([§7](transcript-automation.md#health-check-and-reader-failover)).
 
 ## 5. Test the inbox end to end
 

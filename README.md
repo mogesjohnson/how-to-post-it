@@ -107,9 +107,11 @@ second one.
 - **No phone app, no widget, no foreground service, no xAI API key** for this path.
 - It holds only a **fine-grained GitHub token** limited to post-it-board contents. It never holds Supabase credentials;
   only the Action does.
-- **Honest caveat:** how the automation actually *reads* your Grok transcript is **unverified**. We know of no
-  public xAI/Grok API for consumer conversation history. The options (official export, Grok Automation, browser
-  automation of grok.com, or just asking Ara) and their tradeoffs are in the doc.
+- **Honest caveat:** how the automation actually *reads* your Grok transcript is **unverified**. There is no
+  public, documented xAI/Grok API for consumer conversation history. The recommended reader uses grok.com's own
+  undocumented `/rest/app-chat/` endpoints with your session cookie (fallback: a signed-in browser profile); both
+  are automated access in tension with xAI's terms, and whether *car/voice* conversations return text is untested.
+  Options, evidence and tradeoffs are in the doc.
 - **Timing:** the threshold is a *minimum* quiet time, checked at each poll. A scheduled job such as GitHub
   Actions cron can't run more often than every 5 minutes, so with cron "8 s" means "at least 8 s of silence,
   noticed at the next run", not "posted within 8 s".
