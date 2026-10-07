@@ -99,6 +99,11 @@ Then:
 
 ## 5. Test the inbox end to end
 
+**✅ Items 1–2 done (2026-10-06):** a live run pushed 14 test commands and 3 cleanup deletes through the inbox
+(add, typo and duplicate matching, edit, rename, delete, invalid input). All 17 workflow runs succeeded with the
+expected results, and the board was left exactly as it was before the test. Use items 1–2 again to re-check the inbox
+after any change to it. Item 3 waits for the transcript automation.
+
 1. From a computer with `gh` signed in: `scripts/send-test-command.sh`. It pushes a clearly named test note and
    prints the result. **This writes to the live board.**
 2. Delete the test pin: run `scripts/send-test-command.sh templates/command-delete.json`. The template targets the pin
