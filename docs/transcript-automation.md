@@ -458,8 +458,8 @@ for adds, and on `ok` for page edits and deletes; never on pin edits or the othe
   the runner is a private workflow), never in a file in any repo.
   - Fine-grained tokens can't be limited to one branch, so this token could also push to `main` (the site code).
     The inbox workflow runs `main`'s `scripts/post.mjs` with the Supabase bot secrets, so a leaked token could rewrite
-    it to steal the bot password. **Protect `main` with a branch ruleset** that blocks direct pushes, with an admin
-    bypass set to *For pull requests only* (the token acts as you) and the enforcement status set to *Active*; see
+    it to steal the bot password. `main` **is protected by a branch ruleset** that blocks direct pushes, with an admin
+    bypass set to *For pull requests only* (the token acts as you) and the enforcement status *Active*; see
     [setup-checklist.md](setup-checklist.md) step 2. A Contents-write token can still merge an open pull request from
     a post-it-board branch, so don't leave those open.
 
