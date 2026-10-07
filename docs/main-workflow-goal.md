@@ -79,7 +79,7 @@ The full list is in [setup-checklist.md](setup-checklist.md).
 ## 8. Why this is safe
 
 - **The public repos hold no secrets.** Anyone can read the code, and that's fine.
-- **The Supabase bot login lives in encrypted GitHub Actions secrets.** Only post-it-board's workflows get them, and GitHub masks them in logs (best effort). Any code the inbox workflow runs, meaning `main`'s `scripts/post.mjs`, can read them, so `main` should be protected by a branch ruleset ([setup-checklist.md](setup-checklist.md) step 2). They never go in chat or files.
+- **The Supabase bot login lives in encrypted GitHub Actions secrets.** Only post-it-board's workflows get them, and GitHub masks them in logs (best effort). Any code the inbox workflow runs, meaning `main`'s `scripts/post.mjs`, can read them, so `main` is protected by a branch ruleset ([setup-checklist.md](setup-checklist.md) step 2). They never go in chat or files.
 - **The database blocks anonymous writes.** Supabase Row Level Security lets the public key only *read*. Adding, editing, or deleting requires signing in as one of the two approved owner accounts, and public sign-ups are turned off. No all-powerful `service_role` key is used anywhere.
 - **The grok.com session cookie stays on the always-on machine.** It's full access to the Grok account, so it never goes in a repo, a secret shared with anyone else, or a chat.
 - **One caveat: posted text stays in git history.** Every inbox command and result file holds the full note text in the public post-it-board repo, on the `inbox` branch. Deleting a note from the board doesn't remove it from there; only rewriting that branch's history does. So summaries must never contain anything sensitive.

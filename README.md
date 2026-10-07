@@ -204,7 +204,7 @@ and the text, with no audio capture at all. The legacy app solved the same probl
 
 If the GitHub token leaks, someone can push files to post-it-board: post or delete notes via the inbox, change the site
 on `main`, or change `main`'s `scripts/post.mjs`, which the inbox workflow runs with the Supabase bot secrets, to steal
-the bot password. **Protect `main` with a branch ruleset** that blocks direct pushes, and don't leave pull requests
+the bot password. `main` **is protected by a branch ruleset** that blocks direct pushes, and don't leave pull requests
 from post-it-board branches open: a Contents-write token can merge them
 ([setup-checklist.md](docs/setup-checklist.md) step 2). Revoke a leaked token in one click and revert with git. Store
 tokens in the runner's secret store, never in any repo.

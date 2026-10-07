@@ -213,7 +213,7 @@ extracted. The options:
   EncryptedSharedPreferences**. They are **never** in source code or any repo.
 - **Blast radius:** if the PAT leaks, someone can push files to post-it-board: post or delete notes through the
   inbox, change the site on `main`, or change `main`'s `scripts/post.mjs` (which the inbox workflow runs with the
-  Supabase bot secrets) to steal the bot password. Protect `main` with a ruleset
+  Supabase bot secrets) to steal the bot password. `main` is protected by a ruleset
   ([setup-checklist.md](setup-checklist.md) step 2). Revoke the token on GitHub in one click.
 - **xAI realtime auth:** xAI documents **ephemeral client secrets** (`POST https://api.x.ai/v1/realtime/client_secrets`)
   for mobile and browser clients, and recommends them over putting the API key on the client. Minting one needs the real

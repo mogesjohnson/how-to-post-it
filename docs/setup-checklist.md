@@ -29,14 +29,23 @@ post-it-board → Settings → Secrets and variables → Actions.
 5. Put the token straight into the secret store of whatever runs the automation (OS keychain, a service's
    environment, or an Actions secret in a **private** repo). Don't paste it into notes, chats, or any repo.
 
-If the token leaks, revoke it on the same page. It can push to post-it-board: post or delete notes through the inbox,
-change the site on `main`, or change `main`'s `scripts/post.mjs`, which the inbox workflow runs with the Supabase bot
-secrets, so it could steal the bot password. **Protect `main` with a ruleset (recommended, not optional):**
-post-it-board → **Settings → Rules → Rulesets → New branch ruleset**, target the default branch, turn on
-*Require a pull request before merging* and *Block force pushes*, add **Repository admin** to the bypass list with
-the mode **For pull requests only**, and set **Enforcement status** to **Active** (new rulesets start as *Disabled*).
-The token acts as you, so a bypass set to *Always allow* would let it push to `main` too. A Contents-write token can
-still merge an open pull request from a post-it-board branch, so don't leave those open.
+If the token leaks, revoke it on the same page. It can push to post-it-board and post or delete notes through the
+inbox. Without the ruleset below it could also change the site on `main`, or change `main`'s `scripts/post.mjs`, which
+the inbox workflow runs with the Supabase bot secrets, and steal the bot password.
+
+**✅ Done (2026-10-06): `main` is protected by a ruleset.** post-it-board's ruleset *Protect main* (enforcement
+**Active**) applies to the default branch only. It requires a pull request for every change to `main` (0 approvals,
+so you can merge your own), blocks force pushes and deletion, and lets **Repository admin** bypass **for pull requests
+only**. A test push straight to `main` was rejected. `inbox` is left unprotected on purpose, because Ara, the poller and
+the workflow's result commits push straight to it. The full settings, the reasons and how it was checked are in
+post-it-board's README under
+[Branch protection](https://github.com/mogesjohnson/post-it-board/blob/main/README.md#branch-protection).
+These still apply:
+
+- Don't change the bypass to *Always allow*. The token acts as you, so it could then push to `main` too.
+- Keep the token at **Contents** only. Pushes to `inbox` run that branch's copy of `inbox.yml`, and GitHub refuses
+  workflow-file changes from a token without the *Workflows* permission.
+- A Contents-write token can still merge an open pull request from a post-it-board branch, so don't leave those open.
 
 ## 3. Check what the transcript looks like on your phone
 
