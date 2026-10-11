@@ -7,11 +7,13 @@ on the phone.
 
 This replaces the earlier plan for a custom Android voice app (see [the comparison](#how-this-replaces-the-phone-app-design)).
 
-> ⚠️ **Read this first: the transcript-reading step is UNVERIFIED.** We know of **no public xAI/Grok API that
-> returns your consumer Grok conversation history** (the xAI API is for model inference, not reading your
-> grok.com or app chats). So *how* the automation reads the transcript is an open design choice. The options and
-> their tradeoffs are in [§2](#2-reading-the-transcript-unverified-choose-one). Everything after the read step
-> (silence detection, summary, inbox push, dedup) is fully specified here and uses only the inbox format that
+> ✅ **Update, Oct 11, 2026: REST reads verified ([issue #2 results](https://github.com/mogesjohnson/how-to-post-it/issues/2#issuecomment-6114199582)).** grok.com's own undocumented
+> `/rest/app-chat/` endpoints returned the **full transcript text of both sides**, with millisecond UTC timestamps,
+> for a **phone voice chat**, using a signed-in browser session. Still **not** a public or supported xAI API, and
+> still untested: a non-browser client, car-originated sessions (expected to look the same), cookie lifetime and
+> rate limits. The test also showed timestamps mark when a turn **starts**, so the quiet threshold is now
+> **10 minutes** (`QUIET_MINUTES`, default 10) instead of 8 s. Details: [§2.6](#26-verified-test-results-oct-11-2026).
+> Everything after the read step (silence detection, summary, inbox push, dedup) uses only the inbox format that
 > `post.mjs` already supports.
 
 > **Where the inbox lives:** the `inbox` branch is in **[mogesjohnson/post-it-board](https://github.com/mogesjohnson/post-it-board/tree/inbox)**,
@@ -21,7 +23,7 @@ This replaces the earlier plan for a custom Android voice app (see [the comparis
 Contents
 
 1. [How transcript mirroring works](#1-how-transcript-mirroring-works)
-2. [Reading the transcript (UNVERIFIED, choose one)](#2-reading-the-transcript-unverified-choose-one)
+2. [Reading the transcript (REST reads verified)](#2-reading-the-transcript-rest-reads-verified)
 3. [The silence-detection loop](#3-the-silence-detection-loop)
 4. [Summarize and push to the inbox](#4-summarize-and-push-to-the-inbox)
 5. [How it fits with the inbox workflow and its secrets](#5-how-it-fits-with-the-inbox-workflow-and-its-secrets)
@@ -39,24 +41,25 @@ Contents
   in your own Grok app. It isn't a documented Tesla or xAI feature, so re-check it after app updates.
 - So the transcript lives in your Grok account, not just in the car. Something that can read your Grok history
   can see each car conversation as a list of messages: `who`, `text`, `timestamp`.
-- **Silence = time since the newest message.** If the newest message in a conversation is older than the
-  threshold (default **8 s**, tunable **5–30 s**), the conversation is treated as finished and gets summarized.
+- **Quiet = time since the newest response.** When both the newest response's `createTime` and the
+  conversation's `modifyTime` are more than **`QUIET_MINUTES`** in the past (default **10 minutes**, configurable),
+  the conversation is treated as finished and gets summarized. If it resumes later, the same note is **edited**.
 - **Ara is not the one doing this.** It's an outside automation or script, so it works even if you never say
   "post it". You can still say "post it" to have Ara push a note right away
   ([docs/ara-instructions.md](ara-instructions.md)); see [§6](#6-idempotency-and-dedup) for how the two avoid
   posting the same conversation twice.
 
-Things to check on your own phone before you build (see [setup-checklist.md](setup-checklist.md)):
+Open questions, and what the Oct 11, 2026 test answered ([details](https://github.com/mogesjohnson/how-to-post-it/issues/2#issuecomment-6114199582)):
 
-| Question | Why it matters |
+| Question | Answer so far |
 |---|---|
-| Does **every** car conversation appear, and how soon after you speak? | Sync delay adds directly to the time before a note is posted |
-| What resolution do the timestamps have: seconds, minutes, or "2 min ago"? | With minute-level or relative times, an 8 s threshold can't be measured from timestamps alone (see [§3.3](#33-timestamps-clocks-and-time-zones)) |
-| Is a timestamp the **start** or the **end** of a message? | If it marks the start, a long answer from Ara looks "silent" while she is still talking |
-| Is there any marker that a conversation came **from the car** (title, icon, mode)? | Lets the automation ignore conversations you had on the phone or the web |
-| Does one drive become **one conversation**, or several? | Affects how many notes a drive produces |
+| Does a voice conversation appear in history, and how soon? | **Yes** for a phone voice chat: fully present on the first check about 2 min after it ended (sync ≤ ~2 min, likely faster). Car sessions: expected the same, **unverified** |
+| What resolution do the timestamps have? | **ISO 8601 UTC with milliseconds**, but **only through the API**. The UI shows no per-message timestamps |
+| Is a timestamp the **start** or the **end** of a message? | **Start** (or when the turn is logged): an assistant reply is stamped ~60 ms to ~2 s after the human turn. Hence the 10-minute threshold |
+| Is there a marker that a conversation came **from the car**? | **No.** Voice chats have `mediaTypes: ["audio"]` (typed chats `[]`); nothing distinguishes car from phone |
+| Does one drive become **one conversation**, or several? | Still to check on real drives. Affects how many notes a drive produces |
 
-## 2. Reading the transcript (UNVERIFIED, choose one)
+## 2. Reading the transcript (REST reads verified)
 
 The automation needs one small adapter, `listRecentConversations()` + `getMessages(conversationId)`, that returns
 messages with role, text and timestamp. **None of the options below is a documented, supported, public feed of
@@ -69,26 +72,27 @@ and the recommendation in [§2.5](#25-recommendation).
 
 | Option | How it would work | Pros | Cons / unknowns |
 |---|---|---|---|
-| **A. Official API or export** | Use an official xAI endpoint for consumer history, *if one appears*. Today the only official route we know of is the account **data download** (grok.com -> Settings -> Data Controls), which produces a ZIP snapshot you request by hand. | Supported, stable format, no scraping | No known live API. The export is a **manual, after-the-fact snapshot**: fine for a backfill or a nightly catch-up, useless for an 8-second threshold. Format can change without notice |
+| **A. Official API or export** | Use an official xAI endpoint for consumer history, *if one appears*. Today the only official route we know of is the account **data download** (grok.com -> Settings -> Data Controls), which produces a ZIP snapshot you request by hand. | Supported, stable format, no scraping | No known live API. The export is a **manual, after-the-fact snapshot**: fine for a backfill or a nightly catch-up, useless for a 10-minute quiet threshold. Format can change without notice |
 | **B. Grok Automation** ([announcement](https://x.ai/news/grok-automations)) | A scheduled Grok Automation is told: "find today's car conversations that aren't on the board yet, summarize them, push inbox files". | Runs inside your Grok account, nothing to host, Grok does the summary itself | **Unverified** whether an Automation can read your *other* conversations, and whether it has a GitHub connector that can write files. The announced schedules are once, daily, weekdays, weekly, monthly or yearly, so this is an **end-of-day sweep**, not silence detection |
-| **C1. REST reads with your grok.com session** | A small script on an always-on machine calls the same **undocumented, same-origin** JSON endpoints grok.com's own web page uses (list conversations, then load one conversation's messages), sending your grok.com session cookies. | Cheap and fast: one small JSON request per poll, so it can poll every few seconds. Exact timestamps from JSON, no page parsing | **Private, undocumented endpoints** that xAI can change or lock down anytime. A session cookie is **full access to your Grok account**. Anti-bot challenges, cookie expiry, and xAI's terms ([§2.3](#23-what-xais-terms-say)) are real risks |
+| **C1. REST reads with your grok.com session** | A small script on an always-on machine calls the same **undocumented, same-origin** JSON endpoints grok.com's own web page uses (list conversations, then load one conversation's messages), sending your grok.com session cookies. | Cheap and fast: one small JSON request per poll. Millisecond timestamps from JSON, no page parsing. **Verified working Oct 11, 2026** for a phone voice chat (browser session) | **Private, undocumented endpoints** that xAI can change or lock down anytime. A session cookie is **full access to your Grok account**. Anti-bot challenges, cookie expiry, and xAI's terms ([§2.3](#23-what-xais-terms-say)) are real risks |
 | **C2. Browser automation of grok.com** | A real browser (Playwright, Puppeteer, or a tool such as Reduck) with a **persistent profile** signed in as you opens grok.com, then reads the conversation list and transcript, either by calling the same endpoints from inside the page or by reading the rendered page. | Behaves like you using the site; the browser keeps its own cookies fresh; can still work when direct requests get challenged | Heavier and slower (seconds per read, hundreds of MB of memory). Breaks when the page layout changes (if it reads the DOM). Same account-access and terms risks as C1 |
 | **D. Ara posts it herself** | No reader at all: you say "post it" (or tell Ara in her instructions to post at the natural end of each conversation). | No extra moving parts, fully within the product. **Untested:** assumes Ara can create files in GitHub | Not automatic if you forget. "Post at the end" is unreliable because Ara doesn't know when you are done, and asking her to post after every answer floods the board |
 
 ### 2.2 What the research found (verified vs reported)
 
-Checked on Oct 5, 2026 with read-only GitHub queries and public web pages. **No grok.com endpoint was called** (with
-or without credentials), so nothing here proves these endpoints work for *your* account or for *car* conversations.
+Checked on Oct 5, 2026 with read-only GitHub queries and public web pages; no grok.com endpoint was called then.
+The live test on Oct 11, 2026 ([§2.6](#26-verified-test-results-oct-11-2026), [issue #2 results](https://github.com/mogesjohnson/how-to-post-it/issues/2#issuecomment-6114199582)) has since
+confirmed the endpoints and fields for a phone voice chat; rows below are updated where it applies.
 
 | Claim | Status | Evidence |
 |---|---|---|
-| grok.com's web app uses `GET https://grok.com/rest/app-chat/conversations` (list) and `POST https://grok.com/rest/app-chat/conversations/{id}/load-responses` (message bodies) | **Verified in third-party source code**, not in any xAI documentation | [pinguarmy/ai-chat-exporter `src/lib/grok-api.ts`](https://github.com/pinguarmy/ai-chat-exporter/blob/main/src/lib/grok-api.ts) calls the list with `pageSize`/`pageToken`, then `conversations_v2/{id}`, then `conversations/{id}/response-node` (to get `responseIds`), then `POST .../load-responses` with body `{"responseIds": [...]}`. [0xSMW/swift-grok `GrokClient+Conversations.swift`](https://github.com/0xSMW/swift-grok/blob/main/Sources/GrokClient/Endpoints/GrokClient%2BConversations.swift) does the same list, `response-node` and `load-responses` calls |
-| Fields useful for silence detection | **Verified in source code** (field names only; not checked against a live response) | List items carry `conversationId`, `title`, `createTime`, `modifyTime` (swift-grok `ConversationModels.swift`; xAI's own grok-build reads the same, below). Loaded responses carry `responseId`, `message`, `sender`, `createTime` (swift-grok `Response` model; ai-chat-exporter reads `sender` and `createTime`) |
+| grok.com's web app uses `GET https://grok.com/rest/app-chat/conversations` (list) and `POST https://grok.com/rest/app-chat/conversations/{id}/load-responses` (message bodies) | **Verified live** (Oct 11, 2026, browser session) and in third-party source code; not in any xAI documentation | [pinguarmy/ai-chat-exporter `src/lib/grok-api.ts`](https://github.com/pinguarmy/ai-chat-exporter/blob/main/src/lib/grok-api.ts) calls the list with `pageSize`/`pageToken`, then `conversations_v2/{id}`, then `conversations/{id}/response-node` (to get `responseIds`), then `POST .../load-responses` with body `{"responseIds": [...]}`. [0xSMW/swift-grok `GrokClient+Conversations.swift`](https://github.com/0xSMW/swift-grok/blob/main/Sources/GrokClient/Endpoints/GrokClient%2BConversations.swift) does the same list, `response-node` and `load-responses` calls |
+| Fields useful for silence detection | **Verified live** (Oct 11, 2026) | List items carry `conversationId`, `title`, `createTime`, `modifyTime` (swift-grok `ConversationModels.swift`; xAI's own grok-build reads the same, below). Loaded responses carry `responseId`, `message`, `sender`, `createTime` (swift-grok `Response` model; ai-chat-exporter reads `sender` and `createTime`) |
 | Auth = your grok.com session cookies | **Verified in source code** | ai-chat-exporter is a browser extension that calls the endpoints from the grok.com page with `credentials: 'include'` (the browser attaches your cookies). swift-grok sends a `Cookie` header and requires at least one of `sso`, `sso-rw`, `x-userid`, `x-anonuserid`; its cookie extractor also collects optional `x-challenge`, `x-signature`, `cf_clearance`, `__cf_bm`, and the client sends an `x-statsig-id` header plus browser-like headers |
 | "xai-org/swift-grok" is an official xAI repo | **False** | `xai-org/swift-grok` does not exist (GitHub 404). The Swift client is [0xSMW/swift-grok](https://github.com/0xSMW/swift-grok) (`klu-ai/swift-grok` redirects there), which its own author labels an *"unofficial grok api library"*; MIT, ~22 stars, last commit Aug 17, 2026. The real [xai-org](https://github.com/xai-org) org lists no swift-grok |
 | pinguarmy/ai-chat-exporter exists and covers Grok | **Verified** | [Repo](https://github.com/pinguarmy/ai-chat-exporter): TypeScript browser extension (Chrome/Firefox/Edge), MIT, ~11 stars, last commit Oct 2, 2026. It's an on-demand exporter in your open browser, not a headless poller |
 | xAI's **own** open-source code calls the list endpoint | **Verified** (interesting signal, not a public API) | xAI's [grok-build](https://github.com/xai-org/grok-build) CLI has [`conversations_client.rs`](https://github.com/xai-org/grok-build/blob/main/crates/codegen/xai-grok-shell/src/remote/conversations_client.rs) calling `GET {base}/rest/app-chat/conversations` (default base `https://grok.com`) with an **OAuth bearer token**, not cookies; its login config requests scopes including `conversations:read`. That client only lists/renames/stars/deletes conversations; it does not load message bodies. It hints a token route may exist, but it's undocumented for third parties. **Don't borrow grok-build's login or tokens for this project**; watch for xAI documenting it |
-| Car **voice** conversations return transcript text through these endpoints | **Unverified, with a warning sign** | The archiver [dotCipher/ai-vault](https://github.com/dotCipher/ai-vault/blob/3dde18d2/src/providers/grok-web/index.ts) notes under *KNOWN LIMITATIONS*: *"Voice conversations: Audio files are not accessible through the web interface or API. Only metadata (title, timestamps) can be archived."* Whether that applies to Tesla conversations (which you see as text in the app) is unknown. **Test this first** (setup step 4) |
+| Car **voice** conversations return transcript text through these endpoints | **Verified for a phone voice chat** (full text of both sides, Oct 11, 2026); car-originated sessions expected the same but **unverified**. The earlier warning sign: | The archiver [dotCipher/ai-vault](https://github.com/dotCipher/ai-vault/blob/3dde18d2/src/providers/grok-web/index.ts) notes under *KNOWN LIMITATIONS*: *"Voice conversations: Audio files are not accessible through the web interface or API. Only metadata (title, timestamps) can be archived."* The Oct 11 test contradicts that for current grok.com: `load-responses` returned the text. |
 | Reduck automates grok.com with saved cookies in a hosted or local browser | **Partly verified** | [reduck.ai](https://reduck.ai/) and [docs.reduck.ai](https://docs.reduck.ai/) say scripts run *"in your own Chrome, through our extension"* using your logged-in state, and are also callable by REST API or cron. The pricing table says local runs *"Needs your device on"*, and the cloud browser is *"Auth-based sites coming soon with connectors"*, so **hosted runs using your grok.com login are not offered there today**. A specific Reduck Grok transcript script (reported as `reduck/grok.com/get_chat_messages`) **could not be verified**: no public page was found. Reduck also advertises *"Work behind logins and bypass anti-bot"* -- do not point that at grok.com (see §2.3) |
 | GitHub Actions cron can't run more often than every 5 minutes | **Verified** | [GitHub docs](https://docs.github.com/en/actions/reference/workflows-and-actions/events-that-trigger-workflows#schedule): *"The shortest interval you can run scheduled workflows is once every 5 minutes."* and *"The `schedule` event can be delayed during periods of high loads of GitHub Actions workflow runs."* |
 | Datacenter IPs (Actions runners, cloud VMs) trip grok.com challenges more often | **Unverified** (plausible; commonly reported for Cloudflare-fronted sites) | swift-grok's optional `cf_clearance` / `__cf_bm` cookies indicate Cloudflare sits in front of grok.com |
@@ -125,8 +129,8 @@ What this means here:
 
 ### 2.4 REST reads vs browser automation for this use case
 
-The job: every few seconds, check the newest timestamp of the most recent car conversation, decide whether it has
-been quiet for 8+ seconds, then load that one conversation, summarize it, and push one inbox JSON file.
+The job: every 1–2 minutes, check the most recent voice conversations, decide whether one has been quiet for
+`QUIET_MINUTES` (default 10), then load that one conversation, summarize it, and push one inbox JSON file.
 
 | Dimension | **C1. REST reads (session cookies)** | **C2. Browser automation (persistent profile)** |
 |---|---|---|
@@ -135,23 +139,26 @@ been quiet for 8+ seconds, then load that one conversation, summarize it, and pu
 | **Cookie expiry / rotation** | Cookies expire or get invalidated; you must re-extract and re-inject them by hand when that happens (health check flags it) | The signed-in browser renews cookies as it's used, so it needs manual re-login less often |
 | **Anti-bot / Cloudflare / 2FA** | A bare client is the **most likely to be challenged**, especially from a datacenter IP; it can't solve a challenge and shouldn't try | A real browser with your fingerprint and residential IP is **less likely to be challenged**; still can't (and must not) bypass one. 2FA / Google sign-in happens once when you log the profile in |
 | **Rate limits / breakage if xAI changes things** | Cheap enough to stay well under any limit at a low poll rate; **brittle** to endpoint or schema changes (mitigate with the health check in [§7](#7-failure-modes)) | Same exposure to endpoint changes if it calls them in-page; if it reads the DOM, it survives API changes but breaks on UI changes |
-| **Latency** | Sub-second per poll; silence is noticed within about one poll interval | Seconds per read (page load / render); detection is coarser and slower |
+| **Latency** | Sub-second per poll; quiet is noticed within one poll interval (1–2 min) | Seconds per read (page load / render); detection is coarser and slower |
 | **Resource usage** | Tiny: a cron-like script, a few MB | Heavy: a full Chrome, hundreds of MB of RAM, more CPU; needs a display or headless setup |
-| **Headless / scheduled operation** | Runs fine as a background service on an always-on machine or the box. **Poor fit for GitHub Actions cron**: 5-minute minimum ([verified](#22-what-the-research-found-verified-vs-reported)) defeats an 8 s threshold, and datacenter IPs are the most likely to be challenged | Can run headless on an always-on machine; even worse on GitHub Actions (no persistent profile, datacenter IP, heavy) |
+| **Headless / scheduled operation** | Runs fine as a background service on an always-on machine or the box. **GitHub Actions cron is possible but second-best**: with a 10-minute threshold its 5-minute minimum ([verified](#22-what-the-research-found-verified-vs-reported)) is acceptable, but the cookie would have to be a repo secret and datacenter IPs are the most likely to be challenged | Can run headless on an always-on machine; even worse on GitHub Actions (no persistent profile, datacenter IP, heavy) |
 | **Legal / ToS** | Automated script access; see [§2.3](#23-what-xais-terms-say) | Also automated access; a browser doesn't make it sanctioned. "Bypass anti-bot" tooling makes it worse |
 
-**Why not GitHub Actions cron for the reader.** Even though the *inbox workflow* runs on GitHub, the **reader** should
-not: cron's 5-minute floor makes "8 s of silence" meaningless (you'd detect it minutes later), runs can be delayed
-under load, there's no persistent browser profile, and datacenter IPs are the most likely to hit grok.com
-challenges. Run the reader on an **always-on machine you control** (a home server, a Raspberry Pi, or this box) and
-keep GitHub only for applying inbox files.
+**GitHub Actions cron as the reader host: possible, not preferred.** With a 10-minute quiet threshold, cron's
+5-minute floor (and occasional delays) is no longer a deal-breaker: a note would land roughly 10–20 minutes after a
+conversation ends. But the grok.com session cookie (full account access) would have to live in a **repo secret**
+(use a **private** repo, never the public ones), every run comes from a **datacenter IP** that is more likely to hit
+grok.com challenges (unverified), and a cron job can't keep a persistent browser profile for the C2 fallback. So the
+primary recommendation stays an **always-on machine you control** (a home server, a Raspberry Pi, or this box),
+with GitHub only applying inbox files.
 
 ### 2.5 Recommendation
 
-- **Primary: C1, REST reads with your grok.com session, on an always-on machine you control.** It's the only option
-  that can honour a few-second silence threshold cheaply. Concretely:
-  - **Poll the conversation list cheaply** (`GET /rest/app-chat/conversations?pageSize=…`) every **5-10 s only while
-    a recent car conversation looks active**, and back off to every few minutes when nothing is changing.
+- **Primary: C1, REST reads with your grok.com session, on an always-on machine you control.** Verified working
+  ([§2.6](#26-verified-test-results-oct-11-2026)), cheap, and exact. Concretely:
+  - **Poll the conversation list** (`GET /rest/app-chat/conversations`) every **1–2 minutes**. That is plenty for a
+    10-minute quiet threshold; a note lands about 10–12 minutes after the conversation ends.
+  - **Only voice chats:** consider conversations whose `mediaTypes` contains `"audio"`.
   - **Load message bodies only when a conversation changed** (its `modifyTime` / newest timestamp advanced), via
     `response-node` + `load-responses` -- never on every poll.
   - Keep the session cookie **only** on that machine (file with strict perms, OS keychain, or an encrypted secret).
@@ -166,11 +173,36 @@ keep GitHub only for applying inbox files.
   fields missing) and can auto-fail over from `rest` to `browser`.
 - **Keep D (Ara's "post it") as the manual path** once it's tested (it assumes Ara can write to GitHub), and **A (manual export)** for an occasional
   backfill. **B (Grok Automation)** only if it turns out it can read other conversations and write to GitHub.
-- **Honesty, unchanged:** the endpoints are undocumented and unsupported, whether *voice/car* conversations return
-  transcript text through them is **unverified** (test it first -- setup step 4), and automated access of grok.com is
-  in tension with xAI's AUP ([§2.3](#23-what-xais-terms-say)). If you're not comfortable with the account risk, you're
+- **Honesty:** the endpoints are undocumented and unsupported. Full transcript text is **verified for a phone voice
+  chat from a browser session**; a **non-browser client** and **car-originated** sessions are still untested
+  (setup step 4), and automated access of grok.com is in tension with xAI's AUP ([§2.3](#23-what-xais-terms-say)). If you're not comfortable with the account risk, you're
   left with A (manual export) and D (Ara's "post it"), and D is untested. **Don't** build on xAI's internal
   grok-build OAuth or borrow its tokens.
+
+### 2.6 Verified test results (Oct 11, 2026)
+
+Full write-up, with a sample response: **[issue #2 results comment](https://github.com/mogesjohnson/how-to-post-it/issues/2#issuecomment-6114199582)**. Summary:
+
+- **Verdict: PASS for REST reads.** Read-only, in a desktop browser signed in to grok.com, watching DevTools → Network.
+  Auth: the signed-in grok.com browser session cookies (same-origin). No challenge page; every request returned `200` JSON.
+- **The requests:**
+
+  | Method + path | Returns |
+  |---|---|
+  | `GET /rest/app-chat/conversations` | List: `conversations`, `nextPageToken`, `textSearchMatches`; 60 per page. Items carry `conversationId`, `title`, `createTime`, `modifyTime`, `mediaTypes` and more |
+  | `GET /rest/app-chat/conversations_v2/{id}?includeWorkspaces=true&includeTaskResult=true` | Metadata only (`conversation`) |
+  | `GET /rest/app-chat/conversations/{id}/response-node` | `responseNodes` (`responseId`, `sender`, `parentResponseId`; no text), `inflightResponses` |
+  | `POST /rest/app-chat/conversations/{id}/load-responses` | `responses`: **full transcript text of both sides**, each with `message`, `sender` (`human`/`assistant`), `createTime`, `mediaTypes`, … |
+
+- **Voice chats** have `mediaTypes: ["audio"]` (typed chats `[]`). There is **no** car/phone/source field.
+- **Timestamps:** ISO 8601 UTC with milliseconds, API only (the UI shows none).
+- **Sync:** fully present ≤ ~2 min after the chat ended (first check), probably faster.
+- **Turn-start finding:** assistant `createTime` is ~60 ms to ~2 s after the human turn, so `createTime` marks when a
+  turn **starts**, not when Grok finishes speaking. A short threshold measured from it would fire mid-speech.
+- **Decision:** quiet = newest `createTime` **and** `modifyTime` both older than `QUIET_MINUTES` (default **10**);
+  poll every 1–2 min; edit the same note if the conversation resumes.
+- **Not tested:** browser fallback (moot while REST works), rate limits, cookie lifetime, a non-browser client, and
+  car-originated sessions (expected the same).
 
 ## 3. The silence-detection loop
 
@@ -202,7 +234,7 @@ this record: the loop keeps the last loaded copy in memory only, and loads it ag
 stateDiagram-v2
   [*] --> Active: new conversation or new message seen
   Active --> Active: newer message appears
-  Active --> Quiet: newest message older than threshold
+  Active --> Quiet: newest createTime and modifyTime older than QUIET_MINUTES
   Quiet --> Active: newer message appears
   Quiet --> OptedOut: you said "don't post this"
   Quiet --> Posting: summarize, push inbox file
@@ -219,9 +251,9 @@ stateDiagram-v2
 In words:
 
 1. **Active**: the newest message changed since the last poll. Remember it and its `firstSeenAt`.
-2. **Quiet**: the newest message is at least `threshold` old (see below for how "old" is measured) and is newer
-   than `lastPostedTs`. If the newest message is **yours** (Ara hasn't answered yet), wait longer, e.g. 60 s,
-   because Ara may still be about to reply.
+2. **Quiet**: the newest response's `createTime` **and** the conversation's `modifyTime` are both more than
+   `QUIET_MINUTES` (default 10) in the past, and the newest response is newer than `lastPostedTs`. Ten minutes is
+   long enough that it doesn't matter whose turn was last or that timestamps mark the start of a turn.
 3. **Posting**: summarize the **whole** conversation, push one command file, then watch for its result.
 4. **Posted**: the result says `ok` (or `skipped_duplicate`, which means it was already there). Save `board` and
    `lastPostedTs`.
@@ -238,32 +270,31 @@ In words:
 - **Convert everything to UTC as soon as you read it.** If the transcript shows a full timestamp with an offset,
   parse it as-is. If it shows only a local time ("9:15 PM"), read it as **America/New_York** with a real time-zone
   library (so daylight-saving changes are handled) and combine it with the conversation's date.
-- **Clock skew.** "Time since the newest message" compares *their* clock (the transcript) with *yours* (the
-  machine running the loop). Keep that machine NTP-synced. If a message timestamp is in the **future** by more
-  than ~5 s, don't trust the difference; fall back to the observation method below.
-- **Observation method (recommended whenever timestamps are coarse or skewed).** Measure quiet time as
-  `now − firstSeenAt`: how long the newest message has been the newest **by your own clock**. This works
-  even with minute-level timestamps, but it can only be as precise as your poll interval, and it needs at least
-  two polls.
-- **Start vs. end timestamps.** If a timestamp marks the *start* of a message, a long reply from Ara can look
-  silent while it is still playing. Either raise the threshold or add an estimate of speaking time
-  (roughly the reply length in characters ÷ 15 per second).
+- **API timestamps are UTC with milliseconds** (`2026-10-11T21:42:01.663Z`), verified Oct 11, 2026. Parse them
+  as-is; the UI shows no per-message timestamps, so never scrape times from the page.
+- **Clock skew.** "Time since the newest response" compares *their* clock with *yours* (the machine running the
+  loop). Keep that machine NTP-synced. With a 10-minute threshold, a few seconds of skew don't matter. If a
+  timestamp is in the **future** by more than ~1 min, don't trust the difference; fall back to the observation
+  method below.
+- **Observation method (fallback).** Measure quiet time as `now − firstSeenAt`: how long the newest response has
+  been the newest **by your own clock**. Precise only to the poll interval, which is fine for 10 minutes.
+- **Start vs. end timestamps: verified "start".** An assistant response is stamped ~60 ms to ~2 s after the human
+  turn, so `createTime` marks when a turn starts (or is logged), not when Ara stops talking. That is why the quiet
+  threshold is minutes, not seconds.
 - **Board date.** Use the date the conversation **started**, in America/New_York, and put it in the command's
   `date` field explicitly. Otherwise a conversation summarized after midnight would land on the next day (the
   `post.mjs` default is "today in New York" at processing time).
 
 ### 3.4 Pseudocode
 
-This is pseudocode, not a runnable script. `reader` is the unverified adapter from [§2](#2-reading-the-transcript-unverified-choose-one);
+This is pseudocode, not a runnable script. `reader` is the adapter from [§2](#2-reading-the-transcript-rest-reads-verified);
 `summarize` is described in [§4.1](#41-summary).
 
 ```text
 CONFIG
   reader           = "rest"    # "rest" (C1, primary) or "browser" (C2, fallback) -- same adapter
-  thresholdSec     = 8         # clamp to 5..30
-  userTurnGraceSec = 60        # extra wait when the newest message is yours
-  activePollSec    = 7         # poll the list this often WHILE a car conversation looks active (5-10 s)
-  idlePollSec      = 180       # back off to this when nothing is changing
+  QUIET_MINUTES    = 10        # default; configurable. Quiet = newest createTime AND modifyTime older than this
+  pollSec          = 90        # list poll every 1-2 min (60-120 s); a note lands ~10-12 min after the chat ends
   lookbackHours    = 12        # how far back to look for conversations
   repo = "mogesjohnson/post-it-board", branch = "inbox"
   optOutPhrases    = ["don't post this", "do not post", "off the record"]
@@ -279,16 +310,15 @@ loop forever:
   except SchemaError as e: health.fail("schema", e);    maybe_failover(); sleep(backoff()); continue
   except ReadError as e:   health.fail("read", e);      sleep(backoff()); continue
   health.ok()
-  any_active = false
 
   for conv in convs:
-    if not looks_like_car_conversation(conv): continue
+    if "audio" not in conv.mediaTypes: continue           # voice chats only (typed chats have [])
+    if not looks_like_car_conversation(conv): continue    # optional extra filter: no car/phone field exists
     st = state.load(conv.id) or rebuild_from_results(hash10(conv.id))
     if st.pending: check_result(st); continue             # wait for the Action first (reads GitHub, not grok.com)
     if conv.id not in cache or conv.modifyTime > st.lastLoadedModify:   # changed, or not loaded since start
       cache[conv.id] = reader.getMessages(conv.id)        # the costly load, ONLY when the conversation changed
       st.lastLoadedModify = conv.modifyTime
-      any_active = true                                   # something changed -> poll fast next time
     msgs = cache[conv.id]                                 # unchanged: reuse the copy in memory, still check quiet
     if msgs is empty: continue
     last = msgs[-1]
@@ -300,11 +330,10 @@ loop forever:
       st.lastSeenTs = last.ts; st.firstSeenAt = now; st.status = "active"
       state.save(st); continue
 
-    quiet = now - last.ts
-    if timestamps_are_coarse() or last.ts > now + 5s:     # skew or minute resolution
-      quiet = now - st.firstSeenAt
-    needed = thresholdSec if last.role == "assistant" else max(thresholdSec, userTurnGraceSec)
-    if quiet < needed: any_active = true; continue        # not quiet yet: keep polling fast
+    newest = max(m.createTime for m in msgs)              # createTime = when a turn STARTS (verified)
+    quiet  = now - max(newest, conv.modifyTime)           # both must be older than QUIET_MINUTES
+    if newest > now + 1 min: quiet = now - st.firstSeenAt # clock skew: fall back to our own clock
+    if quiet < QUIET_MINUTES: continue                    # not finished yet; check again next poll
 
     if any(user turn contains an optOutPhrase):
       st.status = "opted_out"; st.lastPostedTs = last.ts; state.save(st); continue
@@ -328,7 +357,7 @@ loop forever:
     st.pending = {file: name, lastTs: last.ts, op: cmd.op, pushedAt: now}; st.status = "posting"
     state.save(st)
 
-  sleep(any_active ? activePollSec : idlePollSec)
+  sleep(pollSec)
 
 check_result(st):
   r = get_file(repo, branch, "inbox/results/" + st.pending.file)   # 404 -> not processed yet
@@ -479,8 +508,8 @@ sequenceDiagram
   D->>C: talks while driving
   C->>H: conversation saved with timestamps
   loop every poll interval
-    R->>H: read recent conversations (method UNVERIFIED)
-    Note over R: newest message older than threshold?
+    R->>H: GET conversations, load-responses if changed (REST, verified for a phone voice chat)
+    Note over R: newest createTime and modifyTime older than QUIET_MINUTES?
   end
   R->>R: summarize whole conversation
   R->>G: PUT inbox/auto-<convKey>-<ts>-<op>.json (fine-grained token)
@@ -511,7 +540,7 @@ sequenceDiagram
 Layers, from strongest to weakest:
 
 1. **Per-conversation state:** `lastPostedTs`. A conversation is summarized only when its newest message is newer
-   than what was last posted, and only after the threshold of quiet time.
+   than what was last posted, and only after `QUIET_MINUTES` of quiet time.
 2. **Deterministic file names:** one name per (conversation, last message, op). Re-runs, crashes and overlapping polls
    produce the same name, and *push if absent* refuses to send it twice.
 3. **Edit instead of add for continued conversations:** after the first `ok`, later summaries of the same
@@ -537,7 +566,7 @@ implement it in `ara_post_point()`, which returns where the unposted part of the
 | Failure | What you see | Handling |
 |---|---|---|
 | **Automation not running** (machine asleep, crashed, laptop closed) | Nothing posted after a drive | State is based on `lastPostedTs`, so when it comes back it catches up on every conversation inside `lookbackHours`. Add a **daily catch-up** with a longer lookback, plus a heartbeat alert if no poll happened for a long time. Conversations you delete from Grok history before the catch-up are lost |
-| **Poll gap** (cron delayed, long poll interval) | Note posted minutes late | Expected: the threshold is a minimum quiet time, not a deadline. GitHub cron can't run more often than every 5 minutes and may start late |
+| **Poll gap** (cron delayed, long poll interval) | Note posted minutes late | Expected: `QUIET_MINUTES` is a minimum quiet time, not a deadline. With a 1–2 min poll a note lands ~10–12 min after the chat ends. GitHub cron can't run more often than every 5 minutes and may start late |
 | **Transcript read failure / schema change** (endpoint changed, fields missing, page layout changed) | Reader errors or returns nothing | **Health check** ([below](#health-check-and-reader-failover)): alert once per failure type, back off, keep retrying. Since conversations stay in history, a later successful read catches up. The **most likely** failure for C1; the `READER` flag can fail over to C2 |
 | **Anti-bot / challenge page** (Cloudflare, CAPTCHA, rate notice from grok.com) | A challenge/HTML instead of JSON, or an unusual status | **Stop and alert. Never auto-solve, rotate IPs, or bypass** ([§2.3](#23-what-xais-terms-say)). Optionally fail over `rest`->`browser`, which is less likely to be challenged, and lengthen the poll interval |
 | **Partial transcript** (sync not finished yet) | Summary missing the last turns | The conversation goes back to Active when more messages arrive, and the next quiet period sends an **edit** with the full summary |
@@ -548,7 +577,7 @@ implement it in `ara_post_point()`, which returns where the unposted part of the
 | **Bad command** (`error_invalid`) | Result `error_invalid` | A bug in the automation (usually length limits). Alert; don't retry the same file |
 | **Wrong topic / ambiguous** (`skipped_ambiguous`) | Result lists `candidates` (or a rename clashed) | Alert. The automation can't choose between candidates: rename or merge the pins on the board by hand, then reset the conversation (which bumps `retry`) |
 | **Duplicate summaries** | Two pages for one drive | Usually Ara's "post it" plus the automation, or lost state: see [§6](#6-idempotency-and-dedup). Delete the extra page on the board |
-| **Not a car conversation** | Phone or web chats get posted | Filter with `looks_like_car_conversation()` (marker, time window, or only conversations you started while driving). Use the opt-out phrase for anything private |
+| **Not a car conversation** | Phone or web chats get posted | Only voice chats (`mediaTypes` contains `"audio"`) are considered, but **phone voice chats look identical to car ones** (no source field, verified). Add a time-window rule or similar in `looks_like_car_conversation()` if needed, and use the opt-out phrase for anything private |
 
 **Car dead zones mostly stop mattering.** The automation runs outside the car and reads the transcript after it
 has synced to your Grok account, so a weak signal on the road only delays when a conversation appears. It doesn't
@@ -575,7 +604,7 @@ recovers. See [§2.5](#25-recommendation).
 
 - **Once:** change the Supabase owner password, create the fine-grained token, choose and set up the reader, and
   check what the transcript looks like on your phone ([setup-checklist.md](setup-checklist.md)).
-- **After the first real drives:** tune the threshold (5–30 s, start at 8) and the "your turn" grace period.
+- **After the first real drives:** tune `QUIET_MINUTES` (default 10): lower it if notes feel slow, raise it if conversations get cut while you pause.
 - **Ongoing:** sign the reader in again when its session expires (re-extract the cookie for C1, re-login the browser profile for C2), renew the GitHub token before it
   expires, glance at the board and fix or delete a bad note, and act on alerts.
 - **When you want it pinned right now:** say "post it" to Ara (untested so far, see [ara-instructions.md](ara-instructions.md)).
@@ -593,14 +622,14 @@ Android app built with Google AI Studio that ran its **own** Ara session over xA
 | Car controls and navigation by voice | ❌ not in the app's session | ✅ unchanged |
 | Code on the phone | Kotlin app, widget, foreground service, Bluetooth audio routing | **None** |
 | Taps before driving | One tap to start the mic (Android 14+ limit) | **None** |
-| Silence detection | Exact: realtime "Ara finished speaking" events + 8 s timer (5–30) | Approximate: newest transcript timestamp vs. now, threshold 8 s (5–30), checked at each poll |
-| Posting latency | ~8 s + network | Threshold + poll interval + ~1 min Action (5+ minutes with GitHub cron) |
+| Silence detection | Exact: realtime "Ara finished speaking" events + 8 s timer (5–30) | Coarse but safe: newest response `createTime` and `modifyTime` both older than `QUIET_MINUTES` (default 10 min), checked every 1–2 min |
+| Posting latency | ~8 s + network | ~10–12 min (threshold + 1–2 min poll + ~1 min Action) |
 | xAI API key | Required (realtime voice, billed per minute) | **Not needed** for voice. A text-model key only if your reader can't summarize |
 | Secrets on the phone | GitHub token + xAI key in Keystore-backed storage | **None.** GitHub token on the automation's runner |
 | Dead zones | Local queue + retries on the phone | Don't matter: the transcript syncs later |
 | Battery / OEM app killers | Real risk | Not on the phone |
-| Biggest unknown | AI Studio Android build, audio routing in the Tesla | **How to read the Grok transcript** (no known public API) |
+| Biggest unknown | AI Studio Android build, audio routing in the Tesla | Undocumented REST endpoints (verified Oct 11, 2026 from a browser; could change); car sessions and non-browser client untested |
 | "Post it" by voice | In the app | Ara pushes the file directly (untested) |
 
-The legacy docs stay in the repo in case the transcript can't be read reliably and you want exact, real-time
+The legacy docs stay in the repo in case the transcript stops being readable and you want exact, real-time
 silence detection after all.

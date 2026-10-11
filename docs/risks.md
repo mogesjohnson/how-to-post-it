@@ -8,12 +8,12 @@ end as **legacy**.
 
 | Risk | Impact | Mitigation |
 |---|---|---|
-| **No known way to read the Grok transcript** | The whole automatic path depends on reading your Grok conversation history, and we know of no public xAI/Grok API for consumer history. | Treated as **unverified**. Evaluate the options in [transcript-automation.md §2](transcript-automation.md#2-reading-the-transcript-unverified-choose-one). Ara's "post it" doesn't need a reader, but it is untested too (unverified item 6). Keep the reader behind one adapter so it can be swapped. |
+| **No public way to read the Grok transcript** | The whole automatic path depends on reading your Grok conversation history, and there is no public xAI/Grok API for consumer history. | grok.com's undocumented REST reads **worked** for a phone voice chat on Oct 11, 2026 ([results](https://github.com/mogesjohnson/how-to-post-it/issues/2#issuecomment-6114199582)), but could change or be blocked anytime. Evaluate the options in [transcript-automation.md §2](transcript-automation.md#2-reading-the-transcript-rest-reads-verified). Ara's "post it" doesn't need a reader, but it is untested too (unverified item 6). Keep the reader behind one adapter so it can be swapped. |
 | **Browser automation is fragile** (option C) | grok.com layout changes, bot detection, session expiry or 2FA stop the reader without warning. | Alert on every read failure and on missing heartbeats. Conversations stay in history, so a fixed reader catches up within `lookbackHours`. Add a daily catch-up sweep. |
 | **Signed-in Grok session = full account access** (option C) | Whoever gets the stored session can read **all** your Grok conversations, not just car ones, and act as you on grok.com. | Run the reader only on a machine you control, with disk encryption. Never put the session in a repo or a public workflow. Sign out other sessions if it leaks. Check xAI's terms of service before relying on it. |
-| **Coarse timing** | With GitHub Actions cron (5-minute minimum, runs may start late) or a once-a-day Grok Automation, notes appear minutes to hours after you stop, not 8 s later. | Documented: the threshold is a minimum quiet time, checked at each poll. Use an always-on runner if latency matters. Say "post it" when you want it now. |
-| **Coarse or skewed timestamps** | Minute-level or relative timestamps can't measure 8 s; a skewed clock posts too early or too late. | NTP on the runner, UTC everywhere, America/New_York for local-only times, and the "first seen" observation method when timestamps are coarse or in the future ([§3.3](transcript-automation.md#33-timestamps-clocks-and-time-zones)). |
-| **Premature post** | A pause while you think, or Ara still talking (if timestamps mark a message's start), looks like silence, so a half-finished conversation is posted. | Longer wait when the newest message is yours. Tune the threshold after real drives. A later continuation sends an `edit` with the full summary, so nothing is lost. |
+| **Coarse timing** | With GitHub Actions cron (5-minute minimum, runs may start late) or a once-a-day Grok Automation, notes appear later than the ~10–12 min an always-on runner gives. | Documented: `QUIET_MINUTES` (default 10) is a minimum quiet time, checked at each poll. Use an always-on runner if latency matters. Say "post it" when you want it now. |
+| **Coarse or skewed timestamps** | The API's timestamps are UTC to the millisecond (verified), but they mark when a turn *starts*; a skewed clock posts too early or too late. | NTP on the runner, UTC everywhere, America/New_York for local-only times, and the "first seen" observation method when timestamps are coarse or in the future ([§3.3](transcript-automation.md#33-timestamps-clocks-and-time-zones)). |
+| **Premature post** | A pause while you think, or Ara still talking (if timestamps mark a message's start), looks like silence, so a half-finished conversation is posted. | A 10-minute `QUIET_MINUTES` (timestamps verified to mark a turn's start). Tune it after real drives. A later continuation sends an `edit` with the full summary, so nothing is lost. |
 | **Duplicate summaries** | Ara's "post it" plus the automation, lost state, or two runners at once put two pages on the board for one conversation. | Deterministic file names + *push if absent*, `edit` for continuations, state rebuildable from `inbox/results/`, a single-runner lock, and skipping what Ara already posted ([§6](transcript-automation.md#6-idempotency-and-dedup)). `skipped_duplicate` is a backstop only. |
 | **Missed posts** | Runner asleep or down longer than the lookback window, or you delete the conversation from Grok before it's read. | Heartbeat alert, longer lookback on startup, daily catch-up. Accepted for deleted conversations. |
 | **Posting things that aren't car notes** | Phone/web Grok chats, or private parts of a drive, land on the **public** board. | `looks_like_car_conversation()` filter, opt-out phrase ("don't post this"), summary rules that drop personal details. Delete by hand on the board if needed, but the text stays in the repo's history (see **Note text stays in public git history**). |
@@ -31,10 +31,13 @@ end as **legacy**.
    (grok.com → Settings → Data Controls) is a manual ZIP snapshot. Whether a Grok Automation can read your other
    conversations, or push files to GitHub, is unverified. Browser automation of grok.com is possible in principle
    but unsupported.
-2. **Car conversations always appear in the phone's Grok history,** and how fast. Based on what you've seen in your own
-   app, not on Tesla or xAI documentation.
-3. **Timestamp resolution and meaning** (seconds vs. minutes; start vs. end of a message) in whatever the reader sees.
-4. **A marker that identifies car conversations.** May not exist; then filtering falls back to time windows.
+   *Update Oct 11, 2026:* grok.com's REST reads returned a phone voice chat's full text from a signed-in browser
+   ([results](https://github.com/mogesjohnson/how-to-post-it/issues/2#issuecomment-6114199582)). A non-browser client is still untested.
+2. **Car conversations always appear in the phone's Grok history,** and how fast. A phone voice chat was there within
+   ~2 min; car-originated sessions are still unverified.
+3. ~~Timestamp resolution and meaning~~ **Answered:** millisecond UTC in the API, marking the *start* of a turn.
+4. **A marker that identifies car conversations.** Verified absent: voice chats only carry `mediaTypes: ["audio"]`, so
+   filtering falls back to time windows.
 5. **Grok-side rate limits and terms** for automated reading.
 6. **Ara can create files in GitHub.** Ara's "post it" path assumes the in-car Grok has a tool that can create a file
    in a GitHub repo. That's unverified, and the path is untested: no `ara-…` result has appeared in the inbox yet.

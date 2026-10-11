@@ -52,19 +52,20 @@ These still apply:
 After a short drive where you talk to Grok in the car, open the **Grok app on your phone → history** and note:
 
 - [ ] the car conversation is there, and how long after you spoke it appeared;
-- [ ] the timestamp format: seconds, minutes only, or relative ("2 min ago");
-- [ ] whether a timestamp marks the start or the end of a message;
-- [ ] whether anything marks it as a car conversation (title, icon, mode);
 - [ ] whether one drive is one conversation or several.
+
+Already answered by the Oct 11, 2026 phone voice-chat test ([results](https://github.com/mogesjohnson/how-to-post-it/issues/2#issuecomment-6114199582)): API timestamps are UTC to the millisecond
+and mark the **start** of a turn (the app shows none), voice chats are `mediaTypes: ["audio"]`, and nothing marks a
+chat as coming from the car.
 
 These answers decide how precise silence detection can be. See
 [transcript-automation.md §1](transcript-automation.md#1-how-transcript-mirroring-works).
 
 ## 4. Choose and set up the transcript reader
 
-**This is the unverified part.** There is no public, documented xAI/Grok API for reading consumer conversation
-history. Research (Oct 5, 2026) found the grok.com web app's own undocumented `/rest/app-chat/` endpoints, used by
-third-party tools with your session cookies. Evaluate the options in [transcript-automation.md §2](transcript-automation.md#2-reading-the-transcript-unverified-choose-one):
+**REST reads: verified for a phone voice chat (Oct 11, 2026, [results](https://github.com/mogesjohnson/how-to-post-it/issues/2#issuecomment-6114199582)).** There is still no public,
+documented xAI/Grok API for reading consumer conversation history. Research (Oct 5, 2026) found the grok.com web app's own undocumented `/rest/app-chat/` endpoints, used by
+third-party tools with your session cookies. Evaluate the options in [transcript-automation.md §2](transcript-automation.md#2-reading-the-transcript-rest-reads-verified):
 
 **Recommended (from [§2.5](transcript-automation.md#25-recommendation)):** primary = **C1, REST reads with your
 grok.com session**, on an always-on machine you control; fallback = **C2, browser automation with a persistent
@@ -72,13 +73,14 @@ signed-in profile**. Keep both behind one `READER=rest|browser` flag. First, **r
 ([§2.3](transcript-automation.md#23-what-xais-terms-say)) and decide if you accept the account risk; if not, you're left with
 A (manual export) and D (Ara, untested).
 
-- [ ] **Test the key unknown first:** confirm a **car** conversation's **text** is actually readable (not just title +
-      timestamps). One archiver reports voice conversations expose only metadata. If car transcripts aren't readable,
-      none of C1/C2 help and you fall back to D.
+- [x] **Key unknown, phone voice chat:** the full text of both sides is readable through `load-responses` from a
+      signed-in browser (Oct 11, 2026). One archiver had reported voice conversations expose only metadata; the test
+      shows otherwise.
+- [ ] **Still to confirm:** the same fetch from the script itself (not a browser), and a conversation started **in the
+      car** (expected to look the same).
 - [ ] **C1. REST reads (primary):** on an always-on machine, extract your grok.com session cookies and store them
       **only** there (file with `600` perms, OS keychain, or an encrypted secret) — **never** in this repo, an inbox
-      file, or chat (a cookie is full account access). Poll the list every 5–10 s only while a conversation is active,
-      back off otherwise, load bodies only when a conversation changed, read-only, your own account only, honour 429s.
+      file, or chat (a cookie is full account access). Poll the list every 1–2 min, load bodies only when a conversation changed, read-only, your own account only, honour 429s.
 - [ ] **C2. Browser automation (fallback):** a persistent browser profile logged in as you, for when C1 is challenged
       or its cookie expires. Guard the whole profile directory like a password. Do **not** use "anti-bot bypass".
 - [ ] **A. Official API or export:** check grok.com → Settings → Data Controls and xAI's docs for anything newer than
@@ -92,8 +94,10 @@ Then:
 1. Implement the loop from [transcript-automation.md §3](transcript-automation.md#3-the-silence-detection-loop)
    behind the reader adapter, with the `READER` flag. Start in a **dry-run mode** that prints the command JSON
    instead of pushing it.
-2. **Run the reader on an always-on machine you control, not GitHub Actions cron** (5-minute minimum defeats the 8 s
-   threshold, and datacenter IPs trip challenges). Keep GitHub only for applying inbox files.
+2. **Run the reader on an always-on machine you control** (recommended). GitHub Actions cron is a *possible* host
+   now that the threshold is 10 minutes, but its 5-minute minimum runs may start late, the session cookie would have
+   to be a repo secret (private repo only), and datacenter IPs may trigger challenges. Keep GitHub only for applying
+   inbox files if you can.
 3. Wire up the **health check**: alert on auth failure, a challenge page, a schema change, missing results, `error`
    results, and a missing heartbeat ([§7](transcript-automation.md#health-check-and-reader-failover)).
 
@@ -123,11 +127,11 @@ test drive and check that `inbox/results/ara-….json` shows `ok`.
       can create a file in a GitHub repo, which hasn't been verified, and no `ara-…` result has appeared in the inbox
       yet. If she can't, the transcript automation is the only automatic path.
 
-## 7. Tune the silence threshold after real drives
+## 7. Tune the quiet threshold after real drives
 
-- Start at **8 s** (allowed range **5–30 s**). If it posts while you're still thinking or mid-conversation, raise it
-  (12–15 s) and/or the "your turn" grace period. If you want notes sooner, lower it (5–6 s), but remember the poll
-  interval usually matters more than the threshold.
+- Start at about **10 min** (`QUIET_MINUTES=10`). If it posts while a conversation is still going (long pauses),
+  raise it. If you want notes sooner, lower it a little, but remember timestamps mark when a turn *starts*, so very
+  short values can fire while Ara is still talking. A continued conversation edits the same page either way.
 - Check after each drive: one page per conversation, continued conversations edit that page, nothing private posted.
 - If you see duplicates, check that the automation skips what Ara already posted
   ([transcript-automation.md §6](transcript-automation.md#6-idempotency-and-dedup)).

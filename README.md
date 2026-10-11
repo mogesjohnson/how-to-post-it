@@ -108,7 +108,8 @@ The Grok app on your phone **mirrors the car conversation** with Ara as a live t
 automation or script (not Ara herself):
 
 1. periodically reads the conversation transcript;
-2. notices when the newest message is older than the **silence threshold** (default **8 s**, tunable **5–30 s**);
+2. every 1–2 minutes, checks recent **voice** chats (`mediaTypes: ["audio"]`) and treats one as finished when its newest
+   message and last change are both older than **`QUIET_MINUTES`** (default **10 minutes**, configurable);
 3. summarizes the conversation;
 4. pushes `inbox/auto-<conversation hash>-<last-message time>-<add|edit>.json` to the `inbox` branch of post-it-board, and the
    existing GitHub Action pins it.
@@ -120,14 +121,16 @@ second one.
 - It holds a **fine-grained GitHub token** limited to post-it-board contents, plus whatever the transcript reader
   needs (a grok.com session cookie or a signed-in browser profile, either one full access to your Grok account). It
   never holds Supabase credentials; only the Action does.
-- **Honest caveat:** how the automation actually *reads* your Grok transcript is **unverified**. There is no
-  public, documented xAI/Grok API for consumer conversation history. The recommended reader uses grok.com's own
-  undocumented `/rest/app-chat/` endpoints with your session cookie (fallback: a signed-in browser profile); both
-  are automated access in tension with xAI's terms, and whether *car/voice* conversations return text is untested.
-  Options, evidence and tradeoffs are in the doc.
-- **Timing:** the threshold is a *minimum* quiet time, checked at each poll. A scheduled job such as GitHub
-  Actions cron can't run more often than every 5 minutes, so with cron "8 s" means "at least 8 s of silence,
-  noticed at the next run", not "posted within 8 s".
+- **Reading the transcript: REST reads verified (Oct 11, 2026, [results](https://github.com/mogesjohnson/how-to-post-it/issues/2#issuecomment-6114199582)).** There is still no public,
+  documented xAI/Grok API for consumer conversation history. The reader uses grok.com's own undocumented
+  `/rest/app-chat/` endpoints with your session cookie (fallback: a signed-in browser profile). A live test returned
+  the full text of both sides of a **phone voice chat**, with millisecond timestamps. Still untested: a non-browser
+  client and car-originated sessions (expected to look the same). Both readers are automated access in tension with
+  xAI's terms. Options, evidence and tradeoffs are in the doc.
+- **Timing:** timestamps mark when a turn *starts*, not when Ara stops talking, so the quiet threshold is minutes,
+  not seconds. A note lands about 10–12 minutes after the conversation ends. The primary host is an always-on machine
+  you control. GitHub Actions cron is a *possible* host (5-minute minimum, runs may start late, the session cookie
+  would have to be a repo secret in a private repo, and datacenter IPs may trigger challenges).
 
 Full design: **[docs/transcript-automation.md](docs/transcript-automation.md)**.
 
@@ -214,7 +217,7 @@ tokens in the runner's secret store, never in any repo.
 | Item | Status |
 |------|--------|
 | Board, Supabase, inbox workflow | ✅ live (post-it-board) |
-| 1. Transcript automation | 📄 designed ([transcript-automation](docs/transcript-automation.md)). **Transcript-reading method unverified**, not built yet |
+| 1. Transcript automation | 📄 designed ([transcript-automation](docs/transcript-automation.md)). REST reads **verified** for a phone voice chat ([issue #2](https://github.com/mogesjohnson/how-to-post-it/issues/2#issuecomment-6114199582)); not built yet ([issue #4](https://github.com/mogesjohnson/how-to-post-it/issues/4)) |
 | 2. Ara pushes to inbox on "post it" | 📄 instructions written ([ara-instructions](docs/ara-instructions.md)). **Untested:** Ara's GitHub access is unverified |
 | Legacy Android voice app | 🗄️ superseded. Spec + generation prompt kept ([ai-studio-prompt](docs/ai-studio-prompt.md)), not built |
 

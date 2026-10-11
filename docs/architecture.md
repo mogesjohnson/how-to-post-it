@@ -6,7 +6,7 @@ Supabase, and shown on https://mogesjohnson.github.io/post-it-board/.
 
 | Path | Trigger | Writes | Status |
 |---|---|---|---|
-| **1. Transcript automation** (primary) | Newest message in the Grok transcript is older than the silence threshold (default 8 s, 5–30) | `inbox/auto-<convKey>-<ts>-<op>.json` (add, later edit) | Designed; transcript-reading method **unverified** ([transcript-automation.md](transcript-automation.md)) |
+| **1. Transcript automation** (primary) | Newest message and last change of a voice chat are older than `QUIET_MINUTES` (default 10 min) | `inbox/auto-<convKey>-<ts>-<op>.json` (add, later edit) | Designed; REST reads **verified** for a phone voice chat ([transcript-automation.md](transcript-automation.md#26-verified-test-results-oct-11-2026)) |
 | **2. Ara "post it"** | You say "post it" in the car | `inbox/ara-<ts>-<slug>.json` | Instructions written ([ara-instructions.md](ara-instructions.md)); **untested**: assumes Ara can create files in GitHub (unverified) |
 | Legacy Android voice app | Its own realtime-session timer | `inbox/<session-id>.json` | Superseded ([below](#legacy-path-custom-android-voice-app-superseded)) |
 
@@ -26,8 +26,8 @@ flowchart LR
   end
 
   subgraph Runner["Transcript automation (runner you choose)"]
-    Reader["Transcript reader<br/>(method UNVERIFIED)"]
-    Loop["Silence loop<br/>threshold 8 s (5-30)<br/>state per conversation"]
+    Reader["Transcript reader<br/>(REST, verified)"]
+    Loop["Silence loop<br/>QUIET_MINUTES 10, poll 1-2 min<br/>state per conversation"]
     Sum["Summarizer"]
     Tok["Fine-grained GitHub token<br/>(post-it-board contents only)"]
   end
@@ -75,11 +75,11 @@ flowchart LR
                          ▼                                                 │ inbox/ara-<ts>-<slug>.json
               Grok history (transcript + timestamps,                       │
               visible in the phone's Grok app)                             │
-                         │ read (method UNVERIFIED), every poll            │
+                         │ REST read (verified), every 1-2 min             │
                          ▼                                                 │
               ┌─────────────────────────────────┐                         │
               │ Transcript automation            │                         │
-              │ • newest msg older than 8 s?     │                         │
+              │ • quiet for QUIET_MINUTES (10)?  │                         │
               │ • state per conversation         │                         │
               │ • summarize whole conversation   │                         │
               │ • fine-grained token (contents)  │                         │
@@ -107,7 +107,7 @@ flowchart LR
 | Component | Responsibility | Not responsible for |
 |-----------|----------------|---------------------|
 | **Ara (built-in car Grok)** | The conversation itself. Path 2: on "post it", is meant to turn the conversation into a command file and push `inbox/ara-*.json` via a GitHub tool (**untested**: that tool is unverified). Could check `inbox/results/` | Detecting silence or posting automatically. Exposes no events to the phone |
-| **Grok history / phone Grok app** | Keeps the car conversation as a transcript with timestamps | Any API we know of for reading it programmatically (**unverified**, see [transcript-automation.md §2](transcript-automation.md#2-reading-the-transcript-unverified-choose-one)) |
+| **Grok history / phone Grok app** | Keeps the car conversation as a transcript with timestamps | A public API for reading it. grok.com's undocumented REST reads work (**verified** for a phone voice chat, see [transcript-automation.md §2](transcript-automation.md#2-reading-the-transcript-rest-reads-verified)) |
 | **Transcript automation** | Path 1: reads recent conversations, measures quiet time, keeps state per conversation, summarizes, pushes `inbox/auto-*.json` (add, later edit), reads results, alerts on failures | Supabase credentials (it never has them). Real-time precision: it's only as fast as its poll interval |
 | **GitHub inbox + Actions** | Accepts command files on `inbox`, runs `post.mjs` with encrypted repo secrets as the bot account, writes `inbox/results/<name>.json`, deletes processed commands (keeps them on `error`), serialized by a concurrency group | Deciding *what* to post; it only executes commands |
 | **Supabase** | Source of truth (days/pins/pages). RLS: public read, writes only for `board_owners` (owner + bot), sign-ups off | Talking to the car, the phone or the automation directly |
@@ -117,17 +117,18 @@ flowchart LR
 
 Full spec: **[transcript-automation.md](transcript-automation.md)**.
 
-- **Loop:** every poll, for each recent car conversation: newest message changed → *Active*; newest message at least
-  `threshold` old (default 8 s, 5–30) and newer than the last posted one → summarize and push. If the newest
-  message is yours, wait longer (Ara may still answer).
+- **Loop:** every 1–2 min, for each recent voice chat (`mediaTypes: ["audio"]`): newest message changed → *Active*;
+  newest `createTime` and `modifyTime` both older than `QUIET_MINUTES` (default 10 min) and newer than the last
+  posted one → summarize and push. Timestamps mark when a turn starts, hence minutes, not seconds.
 - **Clock handling:** all timestamps converted to UTC; local-only times read as America/New_York; if timestamps are
   coarse or in the future (skew), quiet time is measured by the runner's own clock since the message was first seen.
 - **File names:** `inbox/auto-<sha256(conversationId)[:10]>-<last-message UTC YYYYMMDDTHHMMSSZ>-<add|edit>.json`, pushed only if
   neither the command nor its result exists yet.
 - **Continuations:** after the first `ok`, later summaries of the same conversation are `edit` commands on the same
   page (exact `pin` from `matched.pinTitle`, exact `page` title, `target: "page"`).
-- **Timing:** with GitHub Actions cron (5-minute minimum) the threshold means "at least 8 s of silence, noticed at the
-  next run".
+- **Timing:** a note lands about 10–12 min after the conversation ends on an always-on machine (recommended). GitHub
+  Actions cron is a possible host (5-minute minimum, may start late; cookie as a repo secret; datacenter IPs may be
+  challenged).
 
 ---
 

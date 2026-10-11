@@ -33,8 +33,8 @@ Here's how it's meant to work:
 
 1. A small script runs on an **always-on machine** that Moges controls.
 2. It reads his grok.com conversation history with the same web requests grok.com's own page makes. These are `GET grok.com/rest/app-chat/conversations` to list conversations, and `POST grok.com/rest/app-chat/conversations/{id}/load-responses` to get the messages. It authenticates with his grok.com **session cookie**, which is stored only on that machine.
-3. It checks every **5 to 10 seconds** while a conversation is active, and less often when nothing is happening.
-4. When the newest message is at least **8 seconds** old, the conversation counts as finished. The threshold can be set anywhere from 5 to 30 seconds.
+3. It checks every **1 to 2 minutes**, and only looks at voice chats (`mediaTypes: ["audio"]`).
+4. When the newest message's `createTime` and the conversation's `modifyTime` are both at least **10 minutes** old, the conversation counts as finished. The threshold is configurable as `QUIET_MINUTES` (default 10). A note lands about 10 to 12 minutes after the conversation ends.
 5. A **text model** writes a short summary.
 6. The script pushes an inbox command file, and the existing workflow from section 2 posts it to the board.
 
@@ -55,16 +55,16 @@ This is documentation only for now. Nobody should build it unless the primary pl
 
 ## 5. Building it (issue #4)
 
-The actual build is tracked in [issue #4](https://github.com/mogesjohnson/how-to-post-it/issues/4). It covers the transcript reader, the silence loop, the summarizer, the inbox push, and a health check that alerts when sign-in or the data format breaks. That work waits on the test in section 6.
+The actual build is tracked in [issue #4](https://github.com/mogesjohnson/how-to-post-it/issues/4). It covers the transcript reader, the silence loop, the summarizer, the inbox push, and a health check that alerts when sign-in or the data format breaks. The REST test it waited on passed (section 6), so it can start.
 
-## 6. What's still untested
+## 6. What the test showed, and what's still untested
 
-The whole primary plan depends on two things nobody has confirmed yet. They're tracked in [issue #2](https://github.com/mogesjohnson/how-to-post-it/issues/2):
+The REST read was tested on Oct 11, 2026 ([issue #2 results](https://github.com/mogesjohnson/how-to-post-it/issues/2#issuecomment-6114199582)), read-only, in a browser signed in to grok.com:
 
-- **Does the REST read return the full text of a car voice chat?** It might return only the title and timestamps. One third-party project reports that voice chats expose only metadata. Car chats do show titles in the app, but the text itself is the real question.
-- **Are the timestamps precise enough?** An 8-second threshold needs timestamps to the second. Minute-level or "2 min ago" style times won't work, and neither will a long delay before the car chat shows up in the history.
+- **REST reads: verified.** For a **phone voice chat**, `load-responses` returned the **full text of both sides**, not just metadata. The chat was there within about 2 minutes of ending. Voice chats are marked `mediaTypes: ["audio"]`; nothing marks a chat as coming from the car.
+- **Timestamps: precise, but they mark the start of a turn.** They're UTC to the millisecond (only in the API, not in the app). Ara's replies are stamped within about 2 seconds of the question, i.e. when she *starts* talking. A seconds-long threshold would cut her off mid-answer, so the threshold is now **10 minutes**.
 
-Until those are answered with a real car conversation, the transcript automation stays a plan.
+Still untested: a non-browser client (the script itself), a conversation started **in the car** (expected to look the same), how long the session cookie lasts, and rate limits. Issue #2 stays open until the script reproduces the fetch.
 
 ## 7. What Moges still does by hand
 
@@ -72,7 +72,7 @@ Until those are answered with a real car conversation, the transcript automation
 - **Create a limited GitHub token** that can only write to the post-it-board repo, for the script's inbox pushes.
 - **Pick the always-on machine** the script will run on.
 - **Accept, or decline, the terms-of-service risk.** The REST calls are private, undocumented grok.com endpoints. xAI's terms and acceptable-use policy are quoted in [transcript-automation.md](transcript-automation.md) so this can be an informed choice.
-- After a few real drives, **tune the silence threshold**.
+- After a few real drives, **tune `QUIET_MINUTES`** (default 10).
 
 The full list is in [setup-checklist.md](setup-checklist.md).
 
