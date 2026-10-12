@@ -1,0 +1,4 @@
+# secrets never go in the repo (they live in ~/.post-it-poller/env)
+.env
+env
+*.log

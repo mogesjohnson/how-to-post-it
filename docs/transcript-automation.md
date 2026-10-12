@@ -204,6 +204,36 @@ Full write-up, with a sample response: **[issue #2 results comment](https://gith
 - **Not tested:** browser fallback (moot while REST works), rate limits, cookie lifetime, a non-browser client, and
   car-originated sessions (expected the same).
 
+### 2.7 Poller build and test results (Oct 11, 2026)
+
+The poller is built: **[`poller/`](../poller/README.md)** ([issue #4](https://github.com/mogesjohnson/how-to-post-it/issues/4)).
+It follows this document, with these decisions:
+
+- **Runs on the always-on box**, Node 18+ with no dependencies. Polls page 1 of the list every **60–120 s**
+  (default 90), `QUIET_MINUTES` default 10. Only conversations modified after its **first-run start** are
+  considered (no backfill; `--since` overrides).
+- **Reader:** REST (C1) with the `GROK_COOKIE` session cookie; `response-node` → `POST load-responses {"responseIds":[…]}`.
+  `READER=browser` (C2) is a TODO stub.
+- **Summarizer:** local Qwen3.5-2B Q4_K_M via llama.cpp, started per summary and stopped afterwards (no RAM used
+  while idle); JSON-schema output `{pin, title, body}`. No API key. On failure it retries later instead of posting
+  raw transcript text (a change from §4.1's fallback, which would put raw text in the public repo).
+- **State, logs, health** in `~/.post-it-poller/`; health `kind` = `auth|schema|network|summarizer|push`.
+
+Test results (all with **synthetic** conversations; grok.com itself was **not** called, there is no cookie yet):
+
+| Test | Result |
+|---|---|
+| Unit tests (`node poller/test/run.mjs`): quiet detection, first-run no-backfill, `--since`, add → edit on resume, `skipped_not_found` → fresh add, reset/retry names, file naming and push-if-absent dedup, health (401 → auth, HTML challenge → auth, missing fields → schema, network, 429 `Retry-After`, summarizer), `--health` exit codes, secrets file, log privacy, summary cleanup | **23/23 pass** |
+| Summarizer, `transcript_short.txt` (1,957 chars, 667 prompt tokens, ctx 4096) | 13.0 s total (1.6 s model load + 11.4 s), peak RSS 1.53 GB, valid JSON |
+| Summarizer, `transcript_long.txt` (7,963 chars, 2,242 tokens, ctx 4096) | 19.3 s (1.6 s load + 17.7 s), peak RSS 1.53 GB, valid JSON |
+| Summarizer, 80k-char transcript (truncated to the last ~12k tokens, ctx 16384) | 57.8 s, peak RSS 1.68 GB, valid JSON |
+| Summary quality (2B model) | Facts right overall, but it sometimes fills in small details ("leave by 11" became "11 pm") and writes more than 6 bullets (the poller keeps the first 6). Glance at the notes after the first drives |
+| Mock end to end (fake grok.com server + real model + `--dry-run`) | add for the quiet voice chat; active, typed, pre-start and opted-out chats skipped; after new messages, an `edit` of the same pin/page |
+| Live inbox push (fake grok.com, pin `Poller test`, real GitHub push) | `ok`, note visible on the board, then deleted with a `delete` command (`ok`) |
+
+Still open from issue #4: a real car voice chat, a non-browser client against grok.com (cookie lifetime,
+challenges, rate limits), and whether one drive is one conversation.
+
 ## 3. The silence-detection loop
 
 ### 3.1 State per conversation

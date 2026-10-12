@@ -1,0 +1,54 @@
+{
+  "_comment": "SYNTHETIC fixtures only (fictional people and plans). Times are minutes before the fake server's start.",
+  "conversations": [
+    {
+      "conversationId": "synthetic-voice-quiet-0001",
+      "title": "Garden bed plan",
+      "mediaTypes": ["audio"],
+      "messages": [
+        { "sender": "human", "minAgo": 30, "message": "I want to build a raised garden bed this weekend. It should be four feet by eight feet." },
+        { "sender": "assistant", "minAgo": 29.9, "message": "Nice. For a 4 by 8 bed, cedar boards about 12 inches tall work well. You'd need roughly 32 cubic feet of soil." },
+        { "sender": "human", "minAgo": 25, "message": "Okay. I'll plant tomatoes and basil. Remind me to buy cedar boards and soil on Saturday." },
+        { "sender": "assistant", "minAgo": 24.9, "message": "Got it: cedar boards and soil on Saturday, tomatoes and basil for planting." },
+        { "sender": "human", "minAgo": 15, "message": "Also the bed goes on the south side of the yard for sun." },
+        { "sender": "assistant", "minAgo": 14.9, "message": "South side it is, that gives the tomatoes the most sun." }
+      ]
+    },
+    {
+      "conversationId": "synthetic-voice-active-0002",
+      "title": "Podcast ideas",
+      "mediaTypes": ["audio"],
+      "messages": [
+        { "sender": "human", "minAgo": 6, "message": "Let's brainstorm podcast episode ideas about bicycles." },
+        { "sender": "assistant", "minAgo": 2, "message": "Sure: commuting tips, a history of the derailleur, and bike-packing gear." }
+      ]
+    },
+    {
+      "conversationId": "synthetic-text-quiet-0003",
+      "title": "Typed chat",
+      "mediaTypes": [],
+      "messages": [
+        { "sender": "human", "minAgo": 40, "message": "What is the capital of Portugal?" },
+        { "sender": "assistant", "minAgo": 39.9, "message": "Lisbon." }
+      ]
+    },
+    {
+      "conversationId": "synthetic-voice-old-0004",
+      "title": "Old drive",
+      "mediaTypes": ["audio"],
+      "messages": [
+        { "sender": "human", "minAgo": 4320, "message": "Remind me to call the bakery about the cake order." },
+        { "sender": "assistant", "minAgo": 4319.9, "message": "Reminder noted: call the bakery about the cake order." }
+      ]
+    },
+    {
+      "conversationId": "synthetic-voice-optout-0005",
+      "title": "Private",
+      "mediaTypes": ["audio"],
+      "messages": [
+        { "sender": "human", "minAgo": 20, "message": "This one is off the record, don't post this." },
+        { "sender": "assistant", "minAgo": 19.9, "message": "Understood, I won't." }
+      ]
+    }
+  ]
+}

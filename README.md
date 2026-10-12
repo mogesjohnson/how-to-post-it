@@ -5,7 +5,9 @@ the recommended transcript automation, Ara's "post it" command, and the architec
 
 > **New here? Start with [Documentation - redirection to the specific chat that's pinned in Grok that talks about this whole workflow and our thoughts on it and how we put it all together, and the whole transcription is there](docs/main-workflow-goal.md)**, the whole story of this project on one page.
 
-This is a **documentation and spec repo**. It has no app code and no secrets.
+This repo holds the **documentation and spec**, and now also the **[transcript poller](poller/README.md)** (`poller/`), the
+script that implements the transcript automation. It contains no secrets: the poller reads them from a local file on
+the machine that runs it.
 
 | Doc | What's in it |
 |-----|--------------|
@@ -15,6 +17,7 @@ This is a **documentation and spec repo**. It has no app code and no secrets.
 | [docs/architecture.md](docs/architecture.md) | Diagrams of all write paths, who does what, failure modes |
 | [docs/setup-checklist.md](docs/setup-checklist.md) | The steps you do by hand |
 | [docs/risks.md](docs/risks.md) | Honest risks and the list of unverified assumptions |
+| [poller/](poller/README.md) | **The transcript poller:** reads Grok voice chats (REST), detects quiet, summarizes with a local model, pushes to the inbox. Setup, tests, health check |
 | [templates/](templates/) | Example command files (add / edit / delete), all for the test pin `how-to-post-it test` |
 | [scripts/send-test-command.sh](scripts/send-test-command.sh) | Pushes a test command into the board's inbox with `gh` |
 | [docs/ai-studio-prompt.md](docs/ai-studio-prompt.md) | *Superseded, optional legacy:* prompt for the old Android voice app |
@@ -217,7 +220,7 @@ tokens in the runner's secret store, never in any repo.
 | Item | Status |
 |------|--------|
 | Board, Supabase, inbox workflow | ✅ live (post-it-board) |
-| 1. Transcript automation | 📄 designed ([transcript-automation](docs/transcript-automation.md)). REST reads **verified** for a phone voice chat ([issue #2](https://github.com/mogesjohnson/how-to-post-it/issues/2#issuecomment-6114199582)); not built yet ([issue #4](https://github.com/mogesjohnson/how-to-post-it/issues/4)) |
+| 1. Transcript automation | 📄 designed ([transcript-automation](docs/transcript-automation.md)). REST reads **verified** for a phone voice chat ([issue #2](https://github.com/mogesjohnson/how-to-post-it/issues/2#issuecomment-6114199582)). 🛠️ **Poller built** ([`poller/`](poller/README.md), [issue #4](https://github.com/mogesjohnson/how-to-post-it/issues/4)), tested with synthetic chats and a live inbox push; not running yet (needs the grok.com cookie and a fine-grained token) |
 | 2. Ara pushes to inbox on "post it" | 📄 instructions written ([ara-instructions](docs/ara-instructions.md)). **Untested:** Ara's GitHub access is unverified |
 | Legacy Android voice app | 🗄️ superseded. Spec + generation prompt kept ([ai-studio-prompt](docs/ai-studio-prompt.md)), not built |
 
