@@ -220,9 +220,16 @@ tokens in the runner's secret store, never in any repo.
 | Item | Status |
 |------|--------|
 | Board, Supabase, inbox workflow | ✅ live (post-it-board) |
-| 1. Transcript automation | 📄 designed ([transcript-automation](docs/transcript-automation.md)). REST reads **verified** for a phone voice chat ([issue #2](https://github.com/mogesjohnson/how-to-post-it/issues/2#issuecomment-6114199582)). 🛠️ **Poller built** ([`poller/`](poller/README.md), [issue #4](https://github.com/mogesjohnson/how-to-post-it/issues/4)), tested with synthetic chats and a live inbox push; not running yet (needs the grok.com cookie and a fine-grained token) |
+| 1. Transcript automation | 📄 designed ([transcript-automation](docs/transcript-automation.md)). REST reads **verified** for a phone voice chat ([issue #2](https://github.com/mogesjohnson/how-to-post-it/issues/2#issuecomment-6114199582)). 🛠️ **Poller built** ([`poller/`](poller/README.md), [issue #4](https://github.com/mogesjohnson/how-to-post-it/issues/4)), tested with synthetic chats and a live inbox push; **running** on the box (topic papers, numbers guardrail, auth backoff: [§2.9](docs/transcript-automation.md#29-matching-recall-numbers-guardrail-and-auth-backoff-oct-12-2026)) |
 | 2. Ara pushes to inbox on "post it" | 📄 instructions written ([ara-instructions](docs/ara-instructions.md)). **Untested:** Ara's GitHub access is unverified |
 | Legacy Android voice app | 🗄️ superseded. Spec + generation prompt kept ([ai-studio-prompt](docs/ai-studio-prompt.md)), not built |
+
+## Contributing
+
+`main` is protected by a repository ruleset (**Protect main**, same as post-it-board's): changes go through a
+pull request (no required approvals, so you can merge your own), force pushes and deleting `main` are blocked, and
+admins may bypass only through a pull request. Work on a branch, open a PR, run `node poller/test/run.mjs`, then
+merge (`gh pr merge --merge`).
 
 ## License
 

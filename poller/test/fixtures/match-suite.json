@@ -1,0 +1,39 @@
+{
+  "_comment": "SYNTHETIC topic-matching suite (all fictional). topics = what the board holds; cases = new chats with the expected answer (an exact topic name or NEW). 'hard' marks low-overlap follow-ups and near-miss negatives.",
+  "topics": [
+    { "pinTitle": "Garden plot", "body": "- Decision: plot 7 at the Maple Street community garden grows tomatoes, peppers and lettuce (no zucchini).\n- To do: buy a hose and four tomato cages.\n- Watering days: Tuesday and Saturday.\n- The $40 plot fee is paid." },
+    { "pinTitle": "Bike podcast", "body": "- Episode ideas: commuting tips, derailleur history, bike-packing gear.\n- Record on Sundays with co-host Dana.\n- To do: write the intro for episode 3." },
+    { "pinTitle": "Tax documents", "body": "- Collect the 1099 forms and the property tax receipt before April.\n- Appointment with the accountant in early March.\n- To do: find last year's return." },
+    { "pinTitle": "Garage shelves", "body": "- Decision: three shelves on the left garage wall, 16 inches deep.\n- To do: buy 2x4s and metal brackets on Saturday.\n- Borrow a stud finder from Sam." },
+    { "pinTitle": "Japan trip", "body": "- Tokyo and Kyoto in March, about 10 days.\n- To do: buy a JR pass; compare hotels near Shinjuku.\n- Budget: flights first, then hotels." },
+    { "pinTitle": "Science fair", "body": "- Maya's project: a cardboard solar oven lined with foil.\n- Due November 14.\n- To do: thermometer and black paper for the tray." }
+  ],
+  "cases": [
+    { "id": "garden-mildew", "expect": "Garden plot", "hard": true, "chat": "User: The zucchini leaves next to my plot have white powder on them, is that going to spread to my tomatoes?\nGrok: That sounds like powdery mildew. Keep the tomato leaves dry, water at the base, and ask the neighbor to remove the infected leaves." },
+    { "id": "garden-cages", "expect": "Garden plot", "chat": "User: I picked up the four tomato cages at the hardware store, still need the hose.\nGrok: Nice, one item left. A 50-foot hose should reach plot 7 from the spigot." },
+    { "id": "garden-swap-day", "expect": "Garden plot", "hard": true, "chat": "User: Can I swap my Saturday watering with someone at the community garden? I'll be away next weekend.\nGrok: Post a note on the garden's board; many members trade watering days." },
+    { "id": "podcast-ebikes", "expect": "Bike podcast", "hard": true, "chat": "User: For the show, let's add an episode on e-bikes.\nGrok: Good idea. You could cover battery range and the new trail rules." },
+    { "id": "podcast-dana", "expect": "Bike podcast", "chat": "User: Dana can't make it this Sunday, so let's record the podcast on Monday evening instead.\nGrok: Monday evening it is. Do you want to push the episode 3 intro too?" },
+    { "id": "podcast-mic", "expect": "Bike podcast", "hard": true, "chat": "User: What microphone should Dana and I get for recording our episodes?\nGrok: A pair of dynamic USB mics works well for two people in one room." },
+    { "id": "tax-1099", "expect": "Tax documents", "chat": "User: I found the 1099 from my bank, still missing the property tax receipt.\nGrok: Good, that's one left before your accountant appointment." },
+    { "id": "tax-accountant", "expect": "Tax documents", "hard": true, "chat": "User: The accountant moved our meeting to March 3rd. I still can't find last year's return.\nGrok: Check your email for the e-file confirmation; it usually has a PDF copy." },
+    { "id": "shelves-brackets", "expect": "Garage shelves", "chat": "User: I bought the metal brackets, and Sam dropped off the stud finder.\nGrok: Great. Mark the studs on the left wall before you cut the 2x4s." },
+    { "id": "shelves-pegboard", "expect": "Garage shelves", "hard": true, "chat": "User: Maybe I should put a pegboard above the workbench, next to the new shelves.\nGrok: A pegboard fits well there; keep it above the 16-inch shelves so they don't block it." },
+    { "id": "japan-osaka", "expect": "Japan trip", "hard": true, "chat": "User: Should we add Osaka for two days, between Kyoto and the flight home?\nGrok: Osaka is 15 minutes from Kyoto by Shinkansen, and the JR pass covers it." },
+    { "id": "japan-hotel", "expect": "Japan trip", "chat": "User: I booked the hotel near Shinjuku for five nights in March.\nGrok: Done. Next on your list is the JR pass." },
+    { "id": "science-melted", "expect": "Science fair", "hard": true, "chat": "User: Maya's oven melted a chocolate bar in twenty minutes today!\nGrok: That's a great result for her project. Record the temperature with the thermometer next time." },
+    { "id": "science-poster", "expect": "Science fair", "chat": "User: We need a poster board for Maya's science fair display, due the 14th.\nGrok: A tri-fold board works; add a photo of the solar oven and the temperature chart." },
+    { "id": "garden-fee-receipt", "expect": "Garden plot", "hard": true, "chat": "User: The garden coordinator emailed a receipt for the forty dollars, and says plots open May 1st.\nGrok: Good, so planting can start May 1st." },
+    { "id": "car-oil", "expect": "NEW", "chat": "User: Did my car's oil change today, next one at 45,000 miles.\nGrok: Noted. Also rotate the tires at the next service." },
+    { "id": "passport", "expect": "NEW", "chat": "User: Remind me to renew my passport, it expires in June.\nGrok: Noted, renew the passport before June." },
+    { "id": "dinner", "expect": "NEW", "chat": "User: What should I cook for dinner tonight? Maybe pasta.\nGrok: Pasta with garlic and spinach is quick." },
+    { "id": "dentist", "expect": "NEW", "chat": "User: I need to book a dentist cleaning for next month.\nGrok: Mornings are usually easiest to get." },
+    { "id": "mom-gift", "expect": "NEW", "chat": "User: Ideas for my mom's birthday gift? She likes reading and tea.\nGrok: A tea sampler and a novel by her favorite author." },
+    { "id": "houseplant", "expect": "NEW", "hard": true, "chat": "User: My fiddle leaf fig in the living room keeps dropping leaves. Should I water it more?\nGrok: Probably less; let the top two inches of soil dry and keep it by a bright window." },
+    { "id": "kitchen-cabinets", "expect": "NEW", "hard": true, "chat": "User: We're hanging the new kitchen cabinets this weekend. Do I need a stud finder and brackets?\nGrok: Yes, screw the rail into the studs; the cabinets hang on it." },
+    { "id": "cooking-podcast", "expect": "NEW", "hard": true, "chat": "User: I found a great cooking podcast, the latest episode is about sourdough.\nGrok: Sourdough episodes are popular; do you want to try baking a loaf?" },
+    { "id": "montreal-roadtrip", "expect": "NEW", "hard": true, "chat": "User: Thinking about a road trip to Montreal in July, maybe four days.\nGrok: It's about a 6-hour drive from New York; bring your passport." },
+    { "id": "running-shoes", "expect": "NEW", "chat": "User: My running shoes are worn out, which ones are good for flat feet?\nGrok: Look for stability shoes and try them on in the afternoon." },
+    { "id": "school-bake-sale", "expect": "NEW", "hard": true, "chat": "User: Maya's school has a bake sale on Friday, I said we'd bring cookies.\nGrok: Chocolate chip cookies travel well; bake them Thursday night." }
+  ]
+}
