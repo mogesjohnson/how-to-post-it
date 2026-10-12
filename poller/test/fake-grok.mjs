@@ -1,5 +1,5 @@
 // Local fake of the grok.com REST endpoints the poller reads, serving SYNTHETIC fixtures.
-//   node poller/test/fake-grok.mjs [--port 8787] [--mode ok|401|challenge|schema] [--now 2026-10-05T23:00:00Z]
+//   node poller/test/fake-grok.mjs [--port 8787] [--mode ok|401|challenge|schema] [--now 2026-10-05T23:00:00Z] [--fixture file.json]
 // Admin (test only): POST /__admin/mode {"mode":"401"} · POST /__admin/append {"conversationId", "messages":[{sender,minAgo,message}]}
 import http from "node:http";
 import fs from "node:fs";
@@ -72,6 +72,6 @@ export function startFakeGrok({ port = 0, mode = "ok", fixture = path.join(here,
 if (process.argv[1] && fileURLToPath(import.meta.url) === path.resolve(process.argv[1])) {
   const a = process.argv.slice(2);
   const get = (k, d) => (a.includes(`--${k}`) ? a[a.indexOf(`--${k}`) + 1] : d);
-  const s = await startFakeGrok({ port: Number(get("port", 8787)), mode: get("mode", "ok"), nowMs: get("now") ? Date.parse(get("now")) : Date.now() });
+  const s = await startFakeGrok({ port: Number(get("port", 8787)), mode: get("mode", "ok"), ...(get("fixture") ? { fixture: path.resolve(get("fixture")) } : {}), nowMs: get("now") ? Date.parse(get("now")) : Date.now() });
   console.log(`fake grok listening on ${s.url}`);
 }

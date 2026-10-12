@@ -1,0 +1,18 @@
+{
+  "_comment": "SYNTHETIC fixture for the topic-paper tests (fictional). A later chat about the same community garden plot.",
+  "conversations": [
+    {
+      "conversationId": "synthetic-topic-chat-0102",
+      "title": "Garden plot update",
+      "mediaTypes": ["audio"],
+      "messages": [
+        { "sender": "human", "minAgo": 20, "message": "Update on my plot 7 at the Maple Street community garden: I paid the forty dollar fee today." },
+        { "sender": "assistant", "minAgo": 19.9, "message": "Great, the plot fee is done. Did you get the hose yet?" },
+        { "sender": "human", "minAgo": 17, "message": "Not yet. Also I changed my mind: no zucchini, I'll plant tomatoes instead, plus the peppers and lettuce." },
+        { "sender": "assistant", "minAgo": 16.9, "message": "Tomatoes instead of zucchini. They need stakes or cages, so add those to the list." },
+        { "sender": "human", "minAgo": 14, "message": "Right, buy four tomato cages. And the garden manager said watering days are Tuesday and Saturday." },
+        { "sender": "assistant", "minAgo": 13.9, "message": "Got it: four tomato cages, and watering on Tuesdays and Saturdays." }
+      ]
+    }
+  ]
+}

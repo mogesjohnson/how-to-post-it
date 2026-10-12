@@ -1,0 +1,18 @@
+{
+  "_comment": "SYNTHETIC fixture for the topic-paper tests (fictional). First chat about a community garden plot.",
+  "conversations": [
+    {
+      "conversationId": "synthetic-topic-chat-0101",
+      "title": "Community garden plot",
+      "mediaTypes": ["audio"],
+      "messages": [
+        { "sender": "human", "minAgo": 25, "message": "I got plot 7 at the Maple Street community garden. It's ten feet by ten feet." },
+        { "sender": "assistant", "minAgo": 24.9, "message": "Congrats on plot 7. A ten by ten plot fits about four rows if you leave paths." },
+        { "sender": "human", "minAgo": 22, "message": "I want to grow peppers, zucchini and lettuce. The garden opens for planting on May 1st." },
+        { "sender": "assistant", "minAgo": 21.9, "message": "Peppers and zucchini like full sun, lettuce tolerates some shade, so put the lettuce on the north edge." },
+        { "sender": "human", "minAgo": 18, "message": "Good idea. I still need to buy a hose and pay the forty dollar plot fee by Friday." },
+        { "sender": "assistant", "minAgo": 17.9, "message": "Noted: buy a hose, and pay the forty dollar plot fee by Friday." }
+      ]
+    }
+  ]
+}

@@ -2,9 +2,11 @@
 // Post-it transcript poller (issue #4). Node 18+, no dependencies (built-in fetch).
 //
 // Watches recent Grok voice conversations (REST, read-only), waits until one has been quiet for
-// QUIET_MINUTES, summarizes it with a local llama.cpp model, and pushes one command file to the
-// `inbox` branch of mogesjohnson/post-it-board. A conversation that continues later gets an `edit`
-// of the same page. Design: docs/transcript-automation.md. Usage: poller/README.md.
+// QUIET_MINUTES, then files it into a TOPIC PAPER on mogesjohnson/post-it-board: one pin per topic whose
+// page 1 is a living summary (<= 1,500 characters). The local llama.cpp model decides whether the chat
+// matches an existing topic (read from the board's public, read-only Supabase API) and merges it in
+// (`edit` of page 1), or starts a NEW topic (`add`). Commands go to the board's `inbox` branch.
+// Design: docs/transcript-automation.md. Usage: poller/README.md.
 //
 //   node poller/poller.mjs                 # run the loop (normally via poller/start.sh)
 //   node poller/poller.mjs --once          # one poll cycle, then exit (add --wait to wait for results)
@@ -14,6 +16,7 @@
 //   node poller/poller.mjs --summarize-file transcript.txt  # run the summarizer on a text file
 //   node poller/poller.mjs --send-command cmd.json [--name file.json]   # push one command, wait for result
 //   node poller/poller.mjs --reset <convKey>  # retry a needs_attention conversation (new file name)
+//   node poller/poller.mjs --compact [--dry-run] [--threshold 1500] [--target 1000] [--json]   # weekly compaction
 //
 // Privacy: logs contain only ids (hashed), counts, timestamps and statuses. Never message text,
 // cookies or tokens.
@@ -56,7 +59,12 @@ export function loadConfig(env = process.env, argv = []) {
     llamaThreads: num(env.LLAMA_THREADS, 8),
     llamaPort: num(env.LLAMA_PORT, 0), // 0 = pick a free port
     minFreeMb: num(env.SUMMARIZER_MIN_FREE_MB, 1500),
-    pinOverride: env.POLLER_PIN_OVERRIDE || "", // testing only: force the pin title
+    pinOverride: env.POLLER_PIN_OVERRIDE || "", // testing only: force the pin title of a NEW topic
+    // topics the poller never merges into or compacts (exact titles, comma-separated): the welcome note by default
+    topicsExclude: (env.TOPICS_EXCLUDE ?? "Post-it Board").split(",").map(s => s.trim()).filter(Boolean),
+    maxTopics: num(env.MAX_TOPICS, 40), // most recently updated topics offered to the matcher
+    compactThreshold: num(env.COMPACT_THRESHOLD, 1500),
+    compactTarget: num(env.COMPACT_TARGET, 1000),
     dryRun: !!args["dry-run"],
     since: args.since || env.POLLER_SINCE || "",
   };
@@ -282,10 +290,11 @@ export function formatTranscript(msgs) {
 // ~3 chars per token for English. Context: transcript + prompt overhead + output, 4096..16384.
 export const CHARS_PER_TOKEN = 3.0; // measured 3.1-3.6 on the synthetic transcripts; 3.0 keeps the prompt inside the context
 export const estTokens = s => Math.ceil(s.length / CHARS_PER_TOKEN);
-export const OVERHEAD_TOKENS = 700, MAX_OUT_TOKENS = 500, MAX_CTX = 16384, MIN_CTX = 4096;
-export function fitTranscript(text, maxCtx = MAX_CTX) {
+export const OVERHEAD_TOKENS = 700, MAX_OUT_TOKENS = 900, MAX_CTX = 16384, MIN_CTX = 4096;
+// extraChars: other prompt text sharing the context (topic list, current summary)
+export function fitTranscript(text, maxCtx = MAX_CTX, extraChars = 0) {
   const PREFIX = "[earlier part of the conversation omitted]\n";
-  const budgetChars = Math.floor((maxCtx - OVERHEAD_TOKENS - MAX_OUT_TOKENS) * CHARS_PER_TOKEN) - PREFIX.length;
+  const budgetChars = Math.floor((maxCtx - OVERHEAD_TOKENS - MAX_OUT_TOKENS) * CHARS_PER_TOKEN) - PREFIX.length - extraChars;
   let truncated = false;
   if (text.length > budgetChars) {
     // keep the END (the latest turns matter most), cut at a line boundary
@@ -295,7 +304,7 @@ export function fitTranscript(text, maxCtx = MAX_CTX) {
     text = PREFIX + cut;
     truncated = true;
   }
-  const need = estTokens(text) + OVERHEAD_TOKENS + MAX_OUT_TOKENS;
+  const need = estTokens(text) + Math.ceil(extraChars / CHARS_PER_TOKEN) + OVERHEAD_TOKENS + MAX_OUT_TOKENS;
   const ctx = Math.min(maxCtx, Math.max(MIN_CTX, Math.ceil(need / 1024) * 1024));
   return { text, ctx, truncated };
 }
@@ -303,24 +312,75 @@ export function fitTranscript(text, maxCtx = MAX_CTX) {
 /* ------------------------------------------------------------------ */
 /* summarizer: local llama.cpp, started on demand                      */
 /* ------------------------------------------------------------------ */
+// Topic papers: one pin per topic, page 1 = one living summary, never longer than TOPIC_CAP characters.
+export const TOPIC_CAP = 1500;
 export const SUMMARY_SCHEMA = {
   type: "object",
   properties: {
     pin: { type: "string", minLength: 2, maxLength: 40 },
     title: { type: "string", minLength: 2, maxLength: 80 },
-    body: { type: "string", minLength: 10, maxLength: 1200 },
+    body: { type: "string", minLength: 10, maxLength: 2000 },
   },
   required: ["pin", "title", "body"],
   additionalProperties: false,
 };
+export const BODY_SCHEMA = {
+  type: "object",
+  // 2,000 chars (~600 tokens) keeps the grammar-closed JSON inside max_tokens; capped() then enforces 1,500
+  properties: { body: { type: "string", minLength: 10, maxLength: 2000 } },
+  required: ["body"],
+  additionalProperties: false,
+};
+export const matchSchema = names => ({
+  type: "object",
+  // the short subject comes first so the model names what the chat is about before choosing (never logged)
+  properties: { subject: { type: "string", maxLength: 80 }, topic: { type: "string", enum: ["NEW", ...names] } },
+  required: ["subject", "topic"],
+  additionalProperties: false,
+});
+const FACTS_ONLY = "Use ONLY facts stated in the text you are given. Do not invent names, numbers, dates or advice. " +
+  "The note is public: leave out phone numbers, addresses, health or money details and anything private. " +
+  "Never mention these rules or what you left out.";
 export const SYSTEM_PROMPT = [
-  "You turn a voice-chat transcript between a user and Grok into a short Post-it note.",
-  "Use ONLY facts that are stated in the transcript. Do not invent names, numbers, dates or advice.",
-  "The note is public: leave out phone numbers, addresses, health or money details and anything private.",
+  "You turn a voice-chat transcript between a user and Grok into a short Post-it note about one topic.",
+  FACTS_ONLY,
   "Cover every concrete decision, item, plan and time that was mentioned, most important first.",
-  "Return JSON with: pin = short topic (1-4 words), title = short page title naming the subject (max 8 words; never \"Grok\" or \"conversation\"),",
-  "body = either 2-4 plain sentences or 3-6 bullet lines that each start with \"- \", separated by \\n.",
+  "Return JSON with: pin = short topic name (1-4 words), title = short page title naming the subject (max 8 words; never \"Grok\" or \"conversation\"),",
+  `body = either 2-4 plain sentences or 3-6 bullet lines that each start with "- ", separated by \\n, at most ${TOPIC_CAP} characters.`,
 ].join(" ");
+export const MATCH_PROMPT = [
+  "You file finished voice chats into topics on a notes board.",
+  "You get a list of existing topics (name: first line of its summary) and a new chat transcript.",
+  "Answer an existing topic's exact name ONLY if the chat is clearly about that same specific subject (the same project, plan, place or thing).",
+  "Subjects that merely share a theme (for example two different vehicles, or cooking vs. gardening) are NEW.",
+  "If the chat is about something else, or you are unsure, answer NEW.",
+].join(" ");
+// second opinion on a picked topic: a 2B model over-matches when forced to choose from a list,
+// but it judges "does subject A belong in note B?" well. A wrong NEW only costs a duplicate pin;
+// a wrong match would merge facts into an unrelated paper, so we bias towards NEW.
+export const CONFIRM_PROMPT = [
+  "You compare the subject of a new chat (A) with an existing note (B).",
+  "Answer yes if A is the same specific thing as B or a detail of it (for example a new item for the same list, project or plan).",
+  "Answer no if A is a different thing, even when both share a broad theme.",
+].join(" ");
+export const confirmSchema = { type: "object", properties: { answer: { type: "string", enum: ["yes", "no"] } }, required: ["answer"], additionalProperties: false };
+export const MERGE_PROMPT = [
+  "You maintain a living summary (a 'topic paper') for one topic on a notes board.",
+  "Combine the CURRENT SUMMARY and the NEW CONVERSATION into one updated summary of the whole topic.",
+  FACTS_ONLY,
+  "Order: decisions first, then open to-dos, then the latest facts. When the new conversation changes or corrects something, keep the new version and drop the old one.",
+  "Merge duplicates. Plain text; bullet lines starting with \"- \" are fine.",
+  `HARD LIMIT: at most ${TOPIC_CAP} characters in total. Shorter is better.`,
+].join(" ");
+export const COMPACT_PROMPT = [
+  "You shorten a topic summary on a notes board.",
+  FACTS_ONLY,
+  "Keep decisions, open to-dos and the latest facts first; drop older, repeated or minor details.",
+  "Plain text; bullet lines starting with \"- \" are fine.",
+].join(" ");
+const SHORTEN = (len, limit) =>
+  `This summary is ${len} characters, which is over the hard limit. Rewrite it in at most ${limit} characters. ` +
+  "Keep decisions, open to-dos and the latest facts first; drop older or minor details. Use only the facts already in it.";
 
 export function validateSummary(obj) {
   if (!obj || typeof obj !== "object") return "not an object";
@@ -331,15 +391,137 @@ export function validateSummary(obj) {
 }
 
 export const MAX_BULLETS = 6;
+const tidy = b => b.replace(/\r\n?/g, "\n").replace(/[ \t]+\n/g, "\n").replace(/\n{3,}/g, "\n\n").trim();
+// drop repeated lines and repeated sentences (keeps the first occurrence); a safety net against model loops
+export function dedupeText(body) {
+  const seen = new Set();
+  const key = x => x.toLowerCase().replace(/^[-*•\s]+/, "").replace(/[^a-z0-9$]+/g, " ").trim();
+  return tidy(body).split("\n").map(line => {
+    const parts = line.match(/[^.!?]+[.!?]+(\s+|$)|[^.!?]+$/g) || [line];
+    const kept = parts.filter(p => { const k = key(p); if (!k) return true; if (seen.has(k)) return false; seen.add(k); return true; });
+    const out = kept.join("").trimEnd();
+    return line.trim() && (!out.trim() || /^[-*•]\s*$/.test(out.trim())) ? null : out;
+  }).filter(l => l !== null).join("\n").replace(/\n{3,}/g, "\n\n").trim();
+}
 export function cleanSummary(s) {
-  let body = s.body.replace(/\r\n?/g, "\n").replace(/\n{3,}/g, "\n\n").trim();
+  let body = tidy(s.body);
   const lines = body.split("\n").filter(l => l.trim());
   // the model sometimes writes more than 6 bullets; the prompt asks for the most important first, so keep those
   if (lines.length > MAX_BULLETS && lines.every(l => /^\s*[-*•]\s/.test(l))) body = lines.slice(0, MAX_BULLETS).join("\n");
   return {
     pin: clip(s.pin.replace(/\s+/g, " ").trim(), 60),
     title: clip(s.title.replace(/\s+/g, " ").trim(), 120),
-    body: clip(body, 4000),
+    body,
+  };
+}
+
+// Last resort: cut at the last bullet/line or sentence end that fits, else at a word, so the text stays <= cap.
+export function truncateAtBoundary(text, cap = TOPIC_CAP) {
+  text = tidy(text);
+  if (text.length <= cap) return text;
+  const head = text.slice(0, cap);
+  const nl = head.lastIndexOf("\n");
+  const sent = Math.max(head.lastIndexOf(". "), head.lastIndexOf("! "), head.lastIndexOf("? "), head.endsWith(".") ? cap - 1 : -1);
+  const cut = Math.max(nl, sent >= 0 ? sent + 1 : -1);
+  if (cut >= cap * 0.5) return head.slice(0, cut).trim();
+  const sp = head.lastIndexOf(" ", cap - 1);
+  return head.slice(0, sp > 0 ? sp : cap - 1).trimEnd() + "…";
+}
+
+// First line of a topic summary, for the topic list the matcher sees
+// Distinctive words shared by a transcript and a topic (name + summary). Used as a deterministic tie-breaker
+// when the model picked a topic but its yes/no confirmation said no: on the synthetic suite true follow-ups share
+// 3-18 such words with their topic, unrelated chats 0-1.
+const STOPWORDS = new Set(("that this with have from your what when will would about there their they them then than just also into only " +
+  "some more like make need needs want okay sure yeah good great thanks thank does done dont doesnt it's that's here been being were very much " +
+  "each other these those which while should could before after today tomorrow yesterday week next last right maybe really thing things " +
+  "know think going something user grok").split(" "));
+export function topicWords(text) {
+  const out = new Set();
+  for (const w of String(text || "").toLowerCase().match(/[a-z0-9$]+/g) || []) {
+    if (w.length < 4 || STOPWORDS.has(w)) continue;
+    out.add(w.replace(/(es|s)$/, ""));
+  }
+  return out;
+}
+export const MATCH_MIN_SHARED = 3;
+export function sharedWords(transcript, topic) {
+  const tw = topicWords(`${topic.pinTitle}\n${topic.page1?.body || ""}`), cw = topicWords(transcript);
+  let n = 0; for (const w of tw) if (cw.has(w)) n++;
+  return n;
+}
+
+export function topicGist(body, n = 120) {
+  const line = String(body || "").split("\n").map(l => l.replace(/^\s*[-*•]\s*/, "").trim()).find(Boolean) || "";
+  return clip(line, n);
+}
+
+// Model operations on top of one chat-completion function. chat({system, user, schema, maxTokens}) -> parsed JSON.
+// Kept separate from llama.cpp so tests can script the model's answers.
+export function createModelOps(chat, { cap = TOPIC_CAP, log = () => {} } = {}) {
+  // cap enforcement: re-ask once with stricter wording, then cut at a boundary as a last resort
+  async function capped(body, what) {
+    body = dedupeText(body);
+    const info = { firstLength: body.length, reasked: false, truncated: false };
+    if (body.length > cap) {
+      info.reasked = true;
+      const again = await chat({ system: COMPACT_PROMPT, user: `${SHORTEN(body.length, Math.round(cap * 0.8))}\n\nSUMMARY:\n${body}`, schema: BODY_SCHEMA, maxTokens: 700 });
+      const b2 = dedupeText(String(again?.body || ""));
+      if (b2.length >= 10 && b2.length < body.length) body = b2;
+    }
+    if (body.length > cap) { body = truncateAtBoundary(body, cap); info.truncated = true; }
+    info.length = body.length;
+    log("info", "cap", { what, ...info });
+    return { body, ...info };
+  }
+  return {
+    chat,
+    // -> {topic: "<exact existing name>" | "NEW"}
+    async match(topics, transcript) {
+      const names = [...new Set(topics.map(t => t.pinTitle))];
+      if (!names.length) return { topic: "NEW" };
+      const list = topics.map(t => `- ${t.pinTitle}: ${topicGist(t.page1?.body)}`).join("\n");
+      const r = await chat({ system: MATCH_PROMPT, user: `EXISTING TOPICS:\n${list}\n\nNEW CHAT TRANSCRIPT:\n${transcript}\n\nFirst write the chat's subject in a few words, then pick the existing topic with the same subject, or NEW.`, schema: matchSchema(names), maxTokens: 80 });
+      const topic = r?.topic;
+      if (topic !== "NEW" && !names.includes(topic)) throw new PollerError("summarizer", "topic match: answer outside the allowed list");
+      if (topic === "NEW") return { topic, confirmed: null };
+      const t = topics.find(x => x.pinTitle === topic);
+      // B = name + first line; if that says no, ask once more with the summary text alone, because a
+      // pin name that doesn't describe its content (e.g. renamed by hand) makes the model say no
+      const ask = async b => (await chat({ system: CONFIRM_PROMPT, user: `A: ${clip(String(r.subject || ""), 80)}\nB: ${b}\n\nDoes A belong in note B?`, schema: confirmSchema, maxTokens: 20 }))?.answer === "yes";
+      if (await ask(`${topic} (${topicGist(t.page1?.body)})`)) return { topic, confirmed: true };
+      if (t.page1?.body && await ask(clip(String(t.page1.body), 300))) return { topic, confirmed: true, by: "summary" };
+      // the model's own pick, backed by clear word overlap (and no other topic overlapping as much): accept
+      const shared = topics.map(x => ({ name: x.pinTitle, n: sharedWords(transcript, x) }));
+      const mine = shared.find(x => x.name === topic).n;
+      if (mine >= MATCH_MIN_SHARED && shared.every(x => x.name === topic || x.n < mine)) {
+        log("info", "match accepted by word overlap", { shared: mine });
+        return { topic, confirmed: true, by: "overlap" };
+      }
+      log("info", "match rejected by confirmation", { rejected: topic });
+      return { topic: "NEW", confirmed: false, rejected: topic };
+    },
+    // -> {pin, title, body (<= cap), ...capInfo}
+    async summarizeNew(transcript) {
+      const r = await chat({ system: SYSTEM_PROMPT, user: `Transcript:\n${transcript}`, schema: SUMMARY_SCHEMA, maxTokens: 700 });
+      const bad = validateSummary(r);
+      if (bad) throw new PollerError("summarizer", `model output fails schema: ${bad}`);
+      const s = cleanSummary(r);
+      const c = await capped(s.body, "new");
+      return { ...s, ...c, body: c.body };
+    },
+    // -> {body (<= cap), ...capInfo}
+    async merge(topicName, current, transcript) {
+      const r = await chat({ system: MERGE_PROMPT, user: `TOPIC: ${topicName}\n\nCURRENT SUMMARY:\n${current}\n\nNEW CONVERSATION:\n${transcript}\n\nWrite the updated summary of the whole topic (at most ${cap} characters).`, schema: BODY_SCHEMA, maxTokens: 1000 });
+      if (typeof r?.body !== "string" || !r.body.trim()) throw new PollerError("summarizer", "merge: model output has no body");
+      return capped(r.body, "merge");
+    },
+    // -> {body (<= cap), ...capInfo}
+    async compact(topicName, current, target = 1000) {
+      const r = await chat({ system: COMPACT_PROMPT, user: `TOPIC: ${topicName}\n\nRewrite this summary in about ${target} characters (never more than ${cap}).\n\nSUMMARY:\n${current}`, schema: BODY_SCHEMA, maxTokens: 700 });
+      if (typeof r?.body !== "string" || !r.body.trim()) throw new PollerError("summarizer", "compact: model output has no body");
+      return capped(r.body, "compact");
+    },
   };
 }
 
@@ -368,58 +550,74 @@ function childEnv(libDir) {
   return { ...rest, LD_LIBRARY_PATH: libDir };
 }
 
+// {"body": "....  (cut off by max_tokens) -> {body: "...."}; the cap logic then shortens or truncates it
+export function salvageBody(content) {
+  const m = /^\s*\{\s*"body"\s*:\s*"((?:[^"\\]|\\.)*)/s.exec(String(content));
+  if (!m) return null;
+  try { return { body: JSON.parse(`"${m[1].replace(/\\u[0-9a-fA-F]{0,3}$|\\$/, "")}"`) }; } catch { return null; }
+}
+
 export function createLlamaSummarizer(cfg, log = () => {}) {
-  return {
-    async summarize(transcript) {
-      if (memAvailableMb() < cfg.minFreeMb) throw new PollerError("summarizer", `only ${Math.round(memAvailableMb())} MB RAM free (< ${cfg.minFreeMb}); will retry`);
-      const fit = fitTranscript(transcript);
-      const port = cfg.llamaPort || await freePort();
-      const t0 = Date.now();
-      const srv = spawn(path.join(cfg.llamaDir, "llama-server"), [
-        "-m", cfg.llamaModel, "--host", "127.0.0.1", "--port", String(port), "-t", String(cfg.llamaThreads),
-        "-c", String(fit.ctx), "--no-repack", "--no-mmproj", "-np", "1",
-      ], { env: childEnv(cfg.llamaDir), stdio: "ignore" }); // server output can echo prompts: discard
-      let exited = false; srv.on("exit", () => { exited = true; });
-      const stop = async () => {
-        if (exited) return;
-        srv.kill("SIGTERM");
-        for (let i = 0; i < 100 && !exited; i++) await sleep(100);
-        if (!exited) srv.kill("SIGKILL");
-      };
-      try {
-        const base = `http://127.0.0.1:${port}`;
-        let up = false;
-        for (let i = 0; i < 240 && !exited; i++) {
-          try { const r = await fetch(`${base}/health`); if (r.ok) { up = true; break; } } catch {}
-          await sleep(500);
-        }
-        if (!up) throw new PollerError("summarizer", exited ? "llama-server exited during startup" : "llama-server did not become healthy in 120 s");
-        const loadMs = Date.now() - t0;
-        const body = {
-          messages: [{ role: "system", content: SYSTEM_PROMPT }, { role: "user", content: `Transcript:\n${fit.text}` }],
-          temperature: 0.2, max_tokens: MAX_OUT_TOKENS,
-          response_format: { type: "json_schema", json_schema: { name: "note", schema: SUMMARY_SCHEMA } },
-          chat_template_kwargs: { enable_thinking: false },
-        };
-        const t1 = Date.now();
+  // Start llama-server with this context size, run fn(ops), always stop the server afterwards.
+  async function withModel(ctx, fn) {
+    if (memAvailableMb() < cfg.minFreeMb) throw new PollerError("summarizer", `only ${Math.round(memAvailableMb())} MB RAM free (< ${cfg.minFreeMb}); will retry`);
+    const port = cfg.llamaPort || await freePort();
+    const t0 = Date.now();
+    const srv = spawn(path.join(cfg.llamaDir, "llama-server"), [
+      "-m", cfg.llamaModel, "--host", "127.0.0.1", "--port", String(port), "-t", String(cfg.llamaThreads),
+      "-c", String(ctx), "--no-repack", "--no-mmproj", "-np", "1",
+    ], { env: childEnv(cfg.llamaDir), stdio: "ignore" }); // server output can echo prompts: discard
+    let exited = false; srv.on("exit", () => { exited = true; });
+    const stop = async () => {
+      if (exited) return;
+      srv.kill("SIGTERM");
+      for (let i = 0; i < 100 && !exited; i++) await sleep(100);
+      if (!exited) srv.kill("SIGKILL");
+    };
+    const stats = { ctx, calls: 0, promptTokens: 0, outTokens: 0 };
+    try {
+      const base = `http://127.0.0.1:${port}`;
+      let up = false;
+      for (let i = 0; i < 240 && !exited; i++) {
+        try { const r = await fetch(`${base}/health`); if (r.ok) { up = true; break; } } catch {}
+        await sleep(500);
+      }
+      if (!up) throw new PollerError("summarizer", exited ? "llama-server exited during startup" : "llama-server did not become healthy in 120 s");
+      stats.loadMs = Date.now() - t0;
+      const chat = async ({ system, user, schema, maxTokens = 700 }) => {
         const r = await fetch(`${base}/v1/chat/completions`, {
-          method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify(body), signal: AbortSignal.timeout(600_000),
+          method: "POST", headers: { "content-type": "application/json" }, signal: AbortSignal.timeout(600_000),
+          body: JSON.stringify({
+            messages: [{ role: "system", content: system }, { role: "user", content: user }],
+            temperature: 0.2, max_tokens: maxTokens,
+            // a 2B model can fall into repeating the same sentence until max_tokens; a mild penalty stops that
+            repeat_penalty: 1.1, repeat_last_n: 256,
+            response_format: { type: "json_schema", json_schema: { name: "out", schema } },
+            chat_template_kwargs: { enable_thinking: false },
+          }),
         });
         if (!r.ok) throw new PollerError("summarizer", `llama-server HTTP ${r.status}`);
         const data = await r.json();
-        const mem = procMem(srv.pid);
-        let parsed;
-        try { parsed = JSON.parse(data.choices[0].message.content); } catch { throw new PollerError("summarizer", "model output is not valid JSON"); }
-        const bad = validateSummary(parsed);
-        if (bad) throw new PollerError("summarizer", `model output fails schema: ${bad}`);
-        const stats = {
-          ctx: fit.ctx, truncated: fit.truncated, loadMs, genMs: Date.now() - t1, totalMs: Date.now() - t0,
-          promptTokens: data.timings?.prompt_n ?? data.usage?.prompt_tokens, outTokens: data.timings?.predicted_n ?? data.usage?.completion_tokens,
-          ...(mem || {}),
-        };
-        log("info", "summarized", stats);
-        return { summary: cleanSummary(parsed), stats };
-      } finally { await stop(); }
+        stats.calls++; stats.promptTokens += data.timings?.prompt_n ?? 0; stats.outTokens += data.timings?.predicted_n ?? 0;
+        const content = data.choices?.[0]?.message?.content ?? "";
+        try { return JSON.parse(content); } catch {}
+        const partial = salvageBody(content); // ran out of tokens inside {"body": "...": keep what was written
+        if (partial) { stats.salvaged = (stats.salvaged || 0) + 1; return partial; }
+        throw new PollerError("summarizer", "model output is not valid JSON");
+      };
+      const result = await fn(createModelOps(chat, { log }));
+      Object.assign(stats, procMem(srv.pid) || {}, { totalMs: Date.now() - t0 });
+      log("info", "model session", stats);
+      return { result, stats };
+    } finally { await stop(); }
+  }
+  return {
+    withModel,
+    // one-off summary of a transcript (used by --summarize-file)
+    async summarize(transcript) {
+      const fit = fitTranscript(transcript);
+      const { result, stats } = await withModel(fit.ctx, ops => ops.summarizeNew(fit.text));
+      return { summary: { pin: result.pin, title: result.title, body: result.body }, stats: { ...stats, truncated: fit.truncated } };
     },
   };
 }
@@ -497,35 +695,108 @@ export function createDryRunInbox(dir) {
 }
 
 /* ------------------------------------------------------------------ */
+/* board: public, read-only topic list (Supabase anon key)             */
+/* ------------------------------------------------------------------ */
+const exactCI = s => String(s).replace(/[\ufe0e\ufe0f]/g, "").trim().replace(/\s+/g, " ").toLowerCase(); // as post.mjs
+export function jwtRole(key) {
+  try { return JSON.parse(Buffer.from(String(key).split(".")[1], "base64url").toString("utf8")).role || null; } catch { return null; }
+}
+// URL + anon key: BOARD_SUPABASE_URL/BOARD_SUPABASE_ANON_KEY, else parsed from the site's public config.js
+export async function loadBoardConfig(env = process.env, fetchFn = fetch) {
+  let url = env.BOARD_SUPABASE_URL, key = env.BOARD_SUPABASE_ANON_KEY;
+  if (!url || !key) {
+    const src = env.BOARD_CONFIG || "https://mogesjohnson.github.io/post-it-board/config.js";
+    let text;
+    try { text = /^https?:/.test(src) ? await (await fetchFn(src)).text() : fs.readFileSync(src, "utf8"); }
+    catch (e) { throw new PollerError("board", `cannot read board config ${src}: ${e.cause?.code || e.code || e.message}`); }
+    url ||= /SUPABASE_URL:\s*["']([^"']+)["']/.exec(text)?.[1];
+    key ||= /SUPABASE_ANON_KEY:\s*["']([^"']+)["']/.exec(text)?.[1];
+  }
+  if (!url || !key) throw new PollerError("board", "board Supabase URL / anon key not found");
+  // read-only by design: never accept a service_role (or any non-anon) key here
+  if (!String(key).startsWith("sb_publishable_") && jwtRole(key) !== "anon") throw new PollerError("board", "board key is not the public anon key; refusing to use it");
+  return { url: url.replace(/\/+$/, ""), anonKey: key };
+}
+const latest = (...ts) => ts.filter(Boolean).sort().at(-1) || null; // ISO strings compare lexically (same offset format)
+const byPos = (a, b) => (a.position ?? 0) - (b.position ?? 0) || String(a.created_at).localeCompare(String(b.created_at));
+// rows: pins with day:days(board_date) and pages(...) embedded -> topics, most recently updated first
+export function topicsFromRows(rows) {
+  return rows.map(p => {
+    const pages = (p.pages || []).slice().sort(byPos);
+    const pg = pages[0];
+    const updatedAt = latest(p.updated_at, p.created_at, ...pages.flatMap(x => [x.updated_at, x.created_at]));
+    return {
+      pinId: p.id, pinTitle: p.title, date: p.day?.board_date || null, color: p.color || null, updatedAt, pageCount: pages.length,
+      page1: pg ? { id: pg.id, title: pg.title ?? null, body: pg.body ?? "", updatedAt: latest(pg.updated_at, pg.created_at) } : null,
+    };
+  }).sort((a, b) => Date.parse(b.updatedAt || 0) - Date.parse(a.updatedAt || 0) || String(a.pinTitle).localeCompare(String(b.pinTitle)));
+}
+export function createBoardReader({ env = process.env, fetchFn = fetch, config } = {}) {
+  let conf = config || null;
+  return {
+    async listTopics() {
+      conf ||= await loadBoardConfig(env, fetchFn);
+      const q = "pins?select=id,title,color,created_at,updated_at,day:days(board_date),pages(id,title,body,position,created_at,updated_at)";
+      let res;
+      try { res = await fetchFn(`${conf.url}/rest/v1/${q}`, { headers: { apikey: conf.anonKey, authorization: `Bearer ${conf.anonKey}`, accept: "application/json" } }); }
+      catch (e) { throw new PollerError("board", `board read: ${e.cause?.code || "fetch failed"}`); }
+      if (!res.ok) throw new PollerError("board", `board read: HTTP ${res.status}`);
+      const rows = await res.json().catch(() => null);
+      if (!Array.isArray(rows)) throw new PollerError("board", "board read: unexpected response");
+      return topicsFromRows(rows);
+    },
+  };
+}
+export const isExcluded = (cfg, t) => (cfg.topicsExclude || []).some(x => exactCI(x) === exactCI(t.pinTitle));
+
+/* ------------------------------------------------------------------ */
+/* model lock: one llama-server user at a time (loop vs --compact)     */
+/* ------------------------------------------------------------------ */
+// Returns a release function, or null when another live process holds the lock. Stale locks are taken over.
+export function tryLock(file) {
+  fs.mkdirSync(path.dirname(file), { recursive: true });
+  for (let i = 0; i < 2; i++) {
+    try {
+      const fd = fs.openSync(file, "wx");
+      fs.writeSync(fd, String(process.pid)); fs.closeSync(fd);
+      return () => { try { if (fs.readFileSync(file, "utf8") === String(process.pid)) fs.unlinkSync(file); } catch {} };
+    } catch (e) {
+      if (e.code !== "EEXIST") throw e;
+      let pid = 0; try { pid = Number(fs.readFileSync(file, "utf8")); } catch {}
+      let alive = false;
+      if (pid) { try { process.kill(pid, 0); alive = true; } catch (e2) { alive = e2.code === "EPERM"; } }
+      if (alive) return null;
+      try { fs.unlinkSync(file); } catch {}
+    }
+  }
+  return null;
+}
+
+/* ------------------------------------------------------------------ */
 /* commands                                                            */
 /* ------------------------------------------------------------------ */
-export function buildCommand(st, summary, { firstMsgTime, knownPins = [] }) {
-  if (st.board) {
-    const cmd = { op: "edit", target: "page", date: st.board.date, pin: st.board.pinTitle };
-    if (st.board.pageTitle) cmd.page = st.board.pageTitle; else cmd.pageNumber = st.board.pageNumber;
-    cmd.body = clip(summary.body, LIMITS.body);
-    return cmd;
-  }
-  const date = nyDate(firstMsgTime);
-  // reuse the exact title of a pin this poller already used that day (post.mjs: reuse exact titles)
-  const same = knownPins.find(p => p.date === date && norm(p.pinTitle) === norm(summary.pin));
-  const pin = clip(same ? same.pinTitle : summary.pin, LIMITS.pin);
-  // stable, unique page title: model title + conversation start time (NY); edits find the page by it
-  const title = clip(`${clip(summary.title, 120)} (${nyTime(firstMsgTime)})`, LIMITS.title);
-  return { op: "add", date, pin, title, body: clip(summary.body, LIMITS.body) };
+export const PAGE_TITLE = "Summary";
+// NEW topic: a new pin whose page 1 is the topic paper
+export function addCommand({ date, pin, body, title = PAGE_TITLE }) {
+  return { op: "add", date, pin: clip(pin, LIMITS.pin), title, body: clip(body, LIMITS.body) };
+}
+// existing topic: replace page 1 of that pin (exact day + exact pin title, as post.mjs requires for edits)
+export function editTopicCommand(topic, body) {
+  return { op: "edit", target: "page", date: topic.date, pin: topic.pinTitle, pageNumber: topic.pageNumber || 1, body: clip(body, LIMITS.body) };
 }
 
 /* ------------------------------------------------------------------ */
 /* the poller                                                          */
 /* ------------------------------------------------------------------ */
-export function createPoller({ cfg, reader, summarizer, inbox, log = () => {}, now = Date.now, statePath, healthPath }) {
+export function createPoller({ cfg, reader, summarizer, inbox, board, log = () => {}, now = Date.now, statePath, healthPath }) {
   statePath ??= path.join(cfg.stateDir, "state.json");
   healthPath ??= path.join(cfg.stateDir, "health.json");
+  const modelLock = path.join(cfg.home, "model.lock");
   const health = makeHealth(healthPath, now);
   let state = loadState(statePath);
   if (!state) {
     const since = cfg.since ? new Date(cfg.since).toISOString() : new Date(now()).toISOString();
-    state = { version: 1, firstRunAt: new Date(now()).toISOString(), since, conversations: {}, pins: [] };
+    state = { version: 2, firstRunAt: new Date(now()).toISOString(), since, conversations: {} };
     log("info", "first run: no backfill", { since });
   } else if (cfg.since) {
     state.since = new Date(cfg.since).toISOString();
@@ -534,6 +805,9 @@ export function createPoller({ cfg, reader, summarizer, inbox, log = () => {}, n
   const cache = new Map(); // conversationId -> messages (memory only, never persisted)
   const save = () => saveState(statePath, state);
   save();
+
+  const sameTopic = (a, b) => a && b && a.date === b.date && exactCI(a.pinTitle) === exactCI(b.pinTitle);
+  const topicBusy = (t, self) => Object.values(state.conversations).some(s => s !== self && s.pending && sameTopic(s.pending.topic, t));
 
   async function checkPending(id, st) {
     const p = st.pending;
@@ -554,17 +828,10 @@ export function createPoller({ cfg, reader, summarizer, inbox, log = () => {}, n
     st.lastResult = { file: p.file, status: r.status, op: r.op, message: r.message, processedAt: r.processedAt || null };
     log("info", "result", { conv: st.convKey, file: p.file, status: r.status, op: r.op });
     if (r.status === "ok" || r.status === "skipped_duplicate") {
-      const prev = st.board;
-      st.board = {
-        date: r.date || p.cmd.date, pinTitle: r.matched?.pinTitle || p.cmd.pin,
-        pageTitle: prev ? prev.pageTitle : (p.cmd.title?.trim() || null),
-        pageNumber: r.pageNumber || prev?.pageNumber || null,
-      };
+      st.board = { date: r.date || p.cmd.date, pinTitle: r.matched?.pinTitle || p.cmd.pin, pageNumber: (p.cmd.op === "edit" ? p.cmd.pageNumber : r.pageNumber) || 1 };
       st.lastPostedMsgTime = p.lastTs; st.status = "posted";
-      if (!state.pins.some(x => x.date === st.board.date && x.pinTitle === st.board.pinTitle)) state.pins.push({ date: st.board.date, pinTitle: st.board.pinTitle });
-      state.pins = state.pins.slice(-50);
     } else if (r.status === "skipped_not_found" && p.op === "edit") {
-      st.board = null; st.status = "quiet"; // next poll sends a fresh add (-add name)
+      st.board = null; st.status = "quiet"; // topic gone: the next poll matches again (a NEW topic gets an -add name)
     } else if (r.status === "error") {
       if (!p.alertedError) { p.alertedError = true; log("warn", "inbox Action error; waiting for a re-run", { conv: st.convKey, file: p.file }); }
       return; // keep pending
@@ -573,6 +840,43 @@ export function createPoller({ cfg, reader, summarizer, inbox, log = () => {}, n
       log("warn", "needs attention", { conv: st.convKey, file: p.file, status: r.status });
     }
     st.pending = null;
+  }
+
+  // Decide the topic and write the command, inside one llama-server session.
+  async function writeTopic(st, todo, newMsgs) {
+    const topics = (await board.listTopics()).filter(t => !isExcluded(cfg, t));
+    let target = st.board ? topics.find(t => sameTopic(t, st.board)) || null : null;
+    if (st.board && !target) { log("info", "topic no longer on the board; matching again", { conv: st.convKey }); st.board = null; }
+    if (target && topicBusy(target, st)) return { kind: "busy" };
+    const candidates = topics.slice(0, cfg.maxTopics);
+    const listChars = candidates.reduce((n, t) => n + t.pinTitle.length + 130, 0);
+    const curChars = Math.max(0, ...candidates.map(t => (t.page1?.body || "").length));
+    const fit = fitTranscript(formatTranscript(target ? newMsgs : todo), MAX_CTX, Math.max(listChars, curChars) + 400);
+    const { result, stats } = await summarizer.withModel(fit.ctx, async ops => {
+      let how = target ? "resume" : "new";
+      if (!target && candidates.length) {
+        const m = await ops.match(candidates, fit.text);
+        log("info", "topic match", { conv: st.convKey, candidates: candidates.length, matched: m.topic !== "NEW" });
+        if (m.topic !== "NEW") { target = candidates.find(t => t.pinTitle === m.topic); how = "match"; }
+      }
+      let fresh = null;
+      if (!target) {
+        fresh = await ops.summarizeNew(fit.text);
+        const pin = cfg.pinOverride || fresh.pin;
+        const same = candidates.find(t => norm(t.pinTitle) === norm(pin)); // the name exists already: merge into it
+        if (!same) return { how, cmd: addCommand({ date: nyDate(todo[0].createTime), pin, body: fresh.body }), info: fresh };
+        target = same; how = "same-name";
+      }
+      if (topicBusy(target, st)) return { busy: true };
+      if (!target.page1) { // pin without pages: its first page becomes the topic paper
+        fresh ||= await ops.summarizeNew(fit.text);
+        return { how, cmd: addCommand({ date: target.date, pin: target.pinTitle, body: fresh.body }), info: fresh };
+      }
+      const mg = await ops.merge(target.pinTitle, target.page1.body, fit.text);
+      return { how, cmd: editTopicCommand(target, mg.body), info: mg };
+    });
+    if (result.busy) return { kind: "busy" };
+    return { kind: "write", ...result, stats, truncatedTranscript: fit.truncated };
   }
 
   async function handle(conv, nowMs) {
@@ -607,26 +911,33 @@ export function createPoller({ cfg, reader, summarizer, inbox, log = () => {}, n
       log("info", "opted out", { conv: st.convKey }); return "opted_out";
     }
     const todo = msgs.slice(araPostPoint(msgs));
-    if (todo.filter(m => m.sender === "human").length === 0 || formatTranscript(todo).length < 40) {
+    // a resumed conversation only adds what came after the last post to its topic
+    const newMsgs = st.lastPostedMsgTime ? todo.filter(m => ms(m.createTime) > ms(st.lastPostedMsgTime)) : todo;
+    if (!newMsgs.some(m => m.sender === "human") || formatTranscript(newMsgs).length < 40) {
       st.lastPostedMsgTime = last.createTime; st.status = st.board ? "posted" : "skipped_trivial";
-      log("info", "nothing substantial to post", { conv: st.convKey, messages: todo.length }); return "trivial";
+      log("info", "nothing substantial to post", { conv: st.convKey, messages: newMsgs.length }); return "trivial";
     }
 
-    st.status = "quiet";
-    log("info", "quiet; summarizing", { conv: st.convKey, messages: todo.length, quietMin: +(q.quietMs / 60000).toFixed(1), method: q.method, op: st.board ? "edit" : "add" });
-    let summary;
-    try { ({ summary } = await summarizer.summarize(formatTranscript(todo))); }
-    catch (e) { throw e instanceof PollerError ? e : new PollerError("summarizer", e.message); }
-    if (cfg.pinOverride) summary = { ...summary, pin: cfg.pinOverride };
-    const cmd = buildCommand(st, summary, { firstMsgTime: msgs[0].createTime, knownPins: state.pins });
-    const name = commandFileName(st.convKey, last.createTime, cmd.op, st.retry);
-    const pushed = await inbox.pushIfAbsent(name, cmd);
-    st.pending = { file: name, lastTs: last.createTime, op: cmd.op, pushedAt: new Date(nowMs).toISOString(), cmd };
-    st.status = "posting";
-    log("info", "pushed", { conv: st.convKey, file: name, op: cmd.op, state: pushed.state, commit: pushed.commit?.slice(0, 7) });
-    save();
-    if (pushed.state === "processed") await checkPending(conv.id, st);
-    return "pushed";
+    // one llama-server user at a time: if --compact holds the model, try again next poll
+    const release = tryLock(modelLock);
+    if (!release) { log("info", "model busy (compaction?); deferring", { conv: st.convKey }); return "deferred"; }
+    let w;
+    try {
+      st.status = "quiet";
+      log("info", "quiet; writing topic", { conv: st.convKey, messages: todo.length, newMessages: newMsgs.length, quietMin: +(q.quietMs / 60000).toFixed(1), method: q.method, resume: !!st.board });
+      try { w = await writeTopic(st, todo, newMsgs); }
+      catch (e) { throw e instanceof PollerError ? e : new PollerError("summarizer", e.message); }
+      if (w.kind === "busy") { log("info", "topic has a command waiting for its result; deferring", { conv: st.convKey }); return "deferred"; }
+      const cmd = w.cmd;
+      const name = commandFileName(st.convKey, last.createTime, cmd.op, st.retry);
+      const pushed = await inbox.pushIfAbsent(name, cmd);
+      st.pending = { file: name, lastTs: last.createTime, op: cmd.op, pushedAt: new Date(nowMs).toISOString(), cmd, topic: { date: cmd.date, pinTitle: cmd.pin }, how: w.how };
+      st.status = "posting";
+      log("info", "pushed", { conv: st.convKey, file: name, op: cmd.op, how: w.how, chars: cmd.body.length, reasked: !!w.info?.reasked, truncated: !!w.info?.truncated, state: pushed.state, commit: pushed.commit?.slice(0, 7) });
+      save();
+      if (pushed.state === "processed") await checkPending(conv.id, st);
+      return w.how === "new" ? "pushed_new" : "pushed_merge";
+    } finally { release(); }
   }
 
   return {
@@ -644,7 +955,7 @@ export function createPoller({ cfg, reader, summarizer, inbox, log = () => {}, n
         try { const r = await handle(c, nowMs); counts[r] = (counts[r] || 0) + 1; }
         catch (e) {
           if (!(e instanceof PollerError) || e.kind === "auth" || e.kind === "schema" || e.kind === "network") { save(); throw e; }
-          partError = e; // summarizer/push problem for one conversation: keep going, report it
+          partError = e; // summarizer/board/push problem for one conversation: keep going, report it
           log("error", "conversation failed", { conv: convKey(c.id), kind: e.kind, error: e.message });
         }
       }
@@ -673,6 +984,93 @@ export function createPoller({ cfg, reader, summarizer, inbox, log = () => {}, n
     },
     save,
   };
+}
+
+/* ------------------------------------------------------------------ */
+/* weekly compaction: --compact                                        */
+/* ------------------------------------------------------------------ */
+function loopHasPending(file) {
+  const s = loadState(file);
+  return !!s && Object.values(s.conversations || {}).some(c => c.pending);
+}
+export function selectForCompaction(topics, cfg, threshold) {
+  return topics.filter(t => t.page1 && !isExcluded(cfg, t) && t.page1.body.length > threshold);
+}
+// Rewrites every topic paper longer than `threshold` to about `target` characters (never over TOPIC_CAP) and
+// pushes `edit` commands (or, with dryRun, writes them locally). Holds the model lock for the whole run and
+// waits until the loop has no command waiting for a result, so the two never edit the same page at once.
+export async function runCompaction({ cfg, board, summarizer, inbox, log = () => {}, dryRun = false, threshold = TOPIC_CAP, target = 1000,
+  lockWaitMs = 600_000, pollMs = 5000, resultWaitMs = 300_000, now = Date.now, loopStatePath } = {}) {
+  const report = { startedAt: new Date(now()).toISOString(), dryRun, threshold, target, checked: 0, over: 0, compacted: 0, failed: 0, topics: [], skipped: null };
+  loopStatePath ??= path.join(cfg.home, "state.json");
+  const t0 = now();
+  let release;
+  while (!(release = tryLock(path.join(cfg.home, "model.lock")))) {
+    if (now() - t0 > lockWaitMs) { report.skipped = "model busy: a summary is in progress"; return report; }
+    await sleep(pollMs);
+  }
+  try {
+    while (loopHasPending(loopStatePath)) {
+      if (now() - t0 > lockWaitMs) { report.skipped = "the poller has an inbox command waiting for its result"; return report; }
+      await sleep(pollMs);
+    }
+    const all = (await board.listTopics()).filter(t => t.page1 && !isExcluded(cfg, t));
+    report.checked = all.length;
+    const over = selectForCompaction(all, cfg, threshold);
+    report.over = over.length;
+    if (!over.length) return report;
+    const ctx = fitTranscript("", MAX_CTX, Math.max(...over.map(t => t.page1.body.length)) + 600).ctx;
+    const { result: rewritten } = await summarizer.withModel(ctx, async ops => {
+      const out = [];
+      for (const t of over) {
+        try { out.push({ t, c: await ops.compact(t.pinTitle, t.page1.body, target) }); }
+        catch (e) { out.push({ t, error: e.message }); }
+      }
+      return out;
+    });
+    const stamp = fmtUtcCompact(now());
+    const waiting = [];
+    for (const { t, c, error } of rewritten) {
+      const entry = { pin: t.pinTitle, date: t.date, before: t.page1.body.length, after: c?.body.length ?? null, reasked: !!c?.reasked, truncated: !!c?.truncated, status: null, file: null };
+      report.topics.push(entry);
+      if (error) { entry.status = "error_model"; entry.error = error; report.failed++; continue; }
+      if (c.body.length >= t.page1.body.length) { entry.status = "skipped_not_shorter"; continue; }
+      const cmd = editTopicCommand(t, c.body);
+      entry.file = `compact-${createHash("sha256").update(String(t.pinId)).digest("hex").slice(0, 10)}-${stamp}.json`;
+      try {
+        const p = await inbox.pushIfAbsent(entry.file, cmd);
+        if (dryRun) { entry.status = "dry_run"; report.compacted++; continue; }
+        entry.status = p.state === "processed" ? p.result.status : "pushed";
+        if (p.state !== "processed") waiting.push(entry);
+        else if (p.result.status === "ok") report.compacted++;
+      } catch (e) { entry.status = "error_push"; entry.error = e.message; report.failed++; }
+    }
+    // wait for the inbox Action, so the loop never merges into a page whose compaction isn't applied yet
+    const t1 = now();
+    while (waiting.length && now() - t1 < resultWaitMs) {
+      await sleep(pollMs);
+      for (const e of waiting.slice()) {
+        const r = await inbox.getResult(e.file).catch(() => null);
+        if (!r) continue;
+        e.status = r.status; waiting.splice(waiting.indexOf(e), 1);
+        if (r.status === "ok") report.compacted++; else report.failed++;
+      }
+    }
+    for (const e of waiting) { e.status = "no_result_yet"; report.failed++; }
+    return report;
+  } finally {
+    release();
+    report.finishedAt = new Date(now()).toISOString();
+    log("info", "compaction", { dryRun, threshold, checked: report.checked, over: report.over, compacted: report.compacted, failed: report.failed, skipped: report.skipped,
+      topics: report.topics.map(t => ({ before: t.before, after: t.after, status: t.status })) });
+  }
+}
+export function formatCompactionReport(r) {
+  const lines = [`Compaction ${r.dryRun ? "(dry run) " : ""}${r.startedAt}: threshold ${r.threshold} chars, target ~${r.target}`];
+  if (r.skipped) lines.push(`SKIPPED: ${r.skipped}`);
+  lines.push(`topics checked: ${r.checked}, over threshold: ${r.over}, compacted: ${r.compacted}, failed: ${r.failed}`);
+  for (const t of r.topics) lines.push(`- "${t.pin}" (${t.date}): ${t.before} -> ${t.after ?? "?"} chars, ${t.status}${t.reasked ? ", re-asked" : ""}${t.truncated ? ", truncated" : ""}${t.error ? ` (${t.error})` : ""}`);
+  return lines.join("\n");
 }
 
 export function backoffSeconds(failures, pollSeconds, maxSeconds = 600, retryAfterSec) {
@@ -763,6 +1161,19 @@ async function main(argv) {
     process.exit(r && !/^error/.test(r.status) ? 0 : 2);
   }
 
+  if (a.compact) {
+    // weekly compaction: safe to run while the loop runs (model lock + waits for the loop's pending results)
+    const threshold = Number(a.threshold) || cfg.compactThreshold;
+    // never aim above ~2/3 of the threshold (default 1500 -> 1000), so a low --threshold also means a short target
+    const target = Number(a.target) || Math.min(cfg.compactTarget, Math.floor(threshold * 2 / 3));
+    const inbox = cfg.dryRun ? createDryRunInbox(path.join(cfg.home, "dry-run", "compact"))
+      : createGithubInbox({ token: process.env.INBOX_GITHUB_TOKEN, repo: cfg.repo, branch: cfg.branch, api: cfg.githubApi });
+    const report = await runCompaction({ cfg, board: createBoardReader(), summarizer: createLlamaSummarizer(cfg, () => {}), inbox, log: makeLogger(path.join(cfg.home, "poller.log"), { echo: false }),
+      dryRun: cfg.dryRun, threshold, target, lockWaitMs: (Number(a["lock-wait"]) || 600) * 1000 });
+    console.log(a.json ? JSON.stringify(report, null, 2) : formatCompactionReport(report));
+    process.exit(report.skipped ? 75 : report.failed ? 1 : 0);
+  }
+
   if (!acquireLock(path.join(cfg.home, "poller.lock"))) { console.error("another poller is running (lock held)"); process.exit(3); }
   if (a.reset) {
     const p = createPoller({ cfg, reader: null, summarizer: null, inbox: null, log });
@@ -772,7 +1183,7 @@ async function main(argv) {
   }
   const reader = cfg.reader === "browser" ? createBrowserReader()
     : createRestReader({ baseUrl: cfg.grokBase, cookie: process.env.GROK_COOKIE, pageSize: cfg.pageSize });
-  const poller = createPoller({ cfg, reader, summarizer: createLlamaSummarizer(cfg, log), inbox: makeInbox(), log });
+  const poller = createPoller({ cfg, reader, summarizer: createLlamaSummarizer(cfg, log), inbox: makeInbox(), board: createBoardReader(), log });
   log("info", "start", { reader: reader.kind, quietMinutes: cfg.quietMinutes, pollSeconds: cfg.pollSeconds, dryRun: cfg.dryRun, since: poller.state.since, repo: cfg.repo, branch: cfg.branch });
 
   for (;;) {

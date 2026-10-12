@@ -1,0 +1,16 @@
+{
+  "_comment": "SYNTHETIC fixture (fictional): an unrelated chat that should become a NEW topic.",
+  "conversations": [
+    {
+      "conversationId": "synthetic-topic-chat-0103",
+      "title": "Car service",
+      "mediaTypes": ["audio"],
+      "messages": [
+        { "sender": "human", "minAgo": 20, "message": "My car is due for an oil change and the wipers are streaking." },
+        { "sender": "assistant", "minAgo": 19.9, "message": "You could book the oil change and ask them to replace the wiper blades at the same visit." },
+        { "sender": "human", "minAgo": 17, "message": "Okay, book it for Thursday morning at the shop on Elm Street." },
+        { "sender": "assistant", "minAgo": 16.9, "message": "Thursday morning at the Elm Street shop: oil change plus new wiper blades." }
+      ]
+    }
+  ]
+}

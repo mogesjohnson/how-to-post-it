@@ -35,10 +35,13 @@ Here's how it's meant to work:
 2. It reads his grok.com conversation history with the same web requests grok.com's own page makes. These are `GET grok.com/rest/app-chat/conversations` to list conversations, and `POST grok.com/rest/app-chat/conversations/{id}/load-responses` to get the messages. It authenticates with his grok.com **session cookie**, which is stored only on that machine.
 3. It checks every **1 to 2 minutes**, and only looks at voice chats (`mediaTypes: ["audio"]`).
 4. When the newest message's `createTime` and the conversation's `modifyTime` are both at least **10 minutes** old, the conversation counts as finished. The threshold is configurable as `QUIET_MINUTES` (default 10). A note lands about 10 to 12 minutes after the conversation ends.
-5. A **text model** writes a short summary.
-6. The script pushes an inbox command file, and the existing workflow from section 2 posts it to the board.
+5. A **local text model** (Qwen3.5-2B on the box) decides which **topic** the chat belongs to. Each pin on the board is one topic, and its **page 1 is one living summary** of that topic, a "topic paper" of at most **1,500 characters**. The script reads the board's topics (read-only), and the model picks one of the existing topic names or `NEW`. Its pick only counts if a second check confirms it, so an unrelated chat never gets merged into the wrong paper.
+6. **Matched:** the model merges the current summary with the new chat (decisions, open to-dos and the latest facts first; facts only; hard cap 1,500 characters, re-asked once and then cut at a sentence if it runs over), and the script sends an `edit` of that pin's page 1. **NEW:** it summarizes the chat and sends an `add` for a new pin.
+7. The script pushes the inbox command file, and the existing workflow from section 2 posts it to the board.
 
-If the conversation picks up again later, the script **edits** the same page instead of creating a duplicate. The full design, with pseudocode, dedup rules and failure modes, is in [transcript-automation.md](transcript-automation.md).
+If the conversation picks up again later, only the new part is merged into the same topic paper instead of creating a duplicate. Once a week, `node /workspace/how-to-post-it/poller/poller.mjs --compact` rewrites any summary that grew past 1,500 characters to about 1,000, through the same inbox; it waits for the running poller so the two never collide.
+
+The board's **Topics** tab (https://mogesjohnson.github.io/post-it-board/#view=topics) lists every topic across all days, most recently updated first, with its summary. The full design, with pseudocode, dedup rules and failure modes, is in [transcript-automation.md](transcript-automation.md) (topic papers: §4.1 and §4.4).
 
 Ara's **"post it"** command is meant to work alongside this: she pushes an inbox file herself, right away. See [ara-instructions.md](ara-instructions.md). It's **untested**: it assumes the car's Grok has a tool that can create files in GitHub, which hasn't been verified, and no `ara-…` result has appeared in the inbox yet.
 

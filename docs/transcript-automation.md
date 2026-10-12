@@ -16,6 +16,13 @@ This replaces the earlier plan for a custom Android voice app (see [the comparis
 > Everything after the read step (silence detection, summary, inbox push, dedup) uses only the inbox format that
 > `post.mjs` already supports.
 
+> 📄 **Update, Oct 12, 2026: topic papers.** One pin = one topic, and its **page 1 is one living summary**
+> (≤ **1,500 characters**). A finished chat that belongs to a topic already on the board is **merged** into that
+> summary (`edit` of page 1); a chat about something new **adds** a pin. A weekly `--compact` run shortens summaries
+> that grew past the cap. The board's new **Topics** tab lists every pin, most recently updated first:
+> https://mogesjohnson.github.io/post-it-board/#view=topics. Design: [§4.1](#41-topic-papers-one-living-summary-per-topic),
+> [§4.4](#44-weekly-compaction); test results: [§2.8](#28-topic-papers-build-and-test-results-oct-12-2026).
+
 > **Where the inbox lives:** the `inbox` branch is in **[mogesjohnson/post-it-board](https://github.com/mogesjohnson/post-it-board/tree/inbox)**,
 > not in this repo. how-to-post-it only holds docs and has no `inbox` branch. An earlier request mentioned
 > "how-to-post-it's inbox branch"; that was a slip. Always push to `mogesjohnson/post-it-board`, branch `inbox`.
@@ -216,7 +223,7 @@ It follows this document, with these decisions:
   `READER=browser` (C2) is a TODO stub.
 - **Summarizer:** local Qwen3.5-2B Q4_K_M via llama.cpp, started per summary and stopped afterwards (no RAM used
   while idle); JSON-schema output `{pin, title, body}`. No API key. On failure it retries later instead of posting
-  raw transcript text (a change from §4.1's fallback, which would put raw text in the public repo).
+  raw transcript text (a change from §4.1a's fallback, which would put raw text in the public repo).
 - **State, logs, health** in `~/.post-it-poller/`; health `kind` = `auth|schema|network|summarizer|push`.
 
 Test results (all with **synthetic** conversations; grok.com itself was **not** called, there is no cookie yet):
@@ -233,6 +240,24 @@ Test results (all with **synthetic** conversations; grok.com itself was **not** 
 
 Still open from issue #4: a real car voice chat, a non-browser client against grok.com (cookie lifetime,
 challenges, rate limits), and whether one drive is one conversation.
+
+### 2.8 Topic papers: build and test results (Oct 12, 2026)
+
+The poller now writes **topic papers** ([§4.1](#41-topic-papers-one-living-summary-per-topic)) and has a weekly
+`--compact` ([§4.4](#44-weekly-compaction)); the board has a **Topics** tab. No database schema change was needed
+(`pins.updated_at` / `pages.updated_at` already exist, kept current by triggers) and `post.mjs` needed no change
+(edits already take the exact day + pin + `pageNumber`).
+
+| Test | Result |
+|---|---|
+| Unit tests (`node poller/test/run.mjs`): everything from §2.7 plus match → edit of page 1 on the topic's own day, NEW → add "Summary", same-name merge, resume merges only the new messages, deleted topic → match again, busy topic and model lock → defer, match enum `NEW` + names, confirmation / second opinion / word overlap, cap (accept, re-ask once, cut at a boundary), loop de-duplication, `salvageBody`, topics sort, anon-only board key, compaction selection / dry run / real run / `skipped_not_shorter` / lock and pending skips | **41/41 pass** |
+| Board site (`post-it-board`): `node tests/run.mjs`, `bash tests/workflow.sh`, `node tests/topics.mjs`, headless-Chrome check of the Topics tab (desktop 1200 px + phone 390 px, demo and live anon read) | 79/79, 24/24, 5/5, 15/15 |
+| Real model (`node poller/test/model-merge.mjs`, one 8k-ctx session, 1.6 s load, peak RSS ~2.1 GB, ~85 s total) | NEW summary 5.3 s → 237 chars · match of the follow-up chat 4.9 s ✓ · unrelated car chat → NEW ✓ (the model's first pick was "Bike podcast"; the confirmation rejected it) · 8-chat match suite: 6 right, 2 missed (→ NEW), **0 wrong topics** · merge of chat 2 7.2 s → 375 chars, correct facts · stress merge (2,480-char summary + 8k-char transcript) 22.8 s → 1,052 chars · compaction of 2,480 chars 6.0 s → 250 chars |
+| Earlier real-model runs | a merge first ran into a repetition loop (2,000 chars of repeated sentences): fixed with `repeat_penalty 1.1` and de-duplicating sentences before the cap check; a JSON body cut off by `max_tokens` is salvaged |
+| Live end to end (fake grok.com, pin **Poller test topic**, real GitHub pushes) | chat 1 → `add` **ok** (188 chars) · chat 2 → `edit` page 1 **ok** (441 chars ≤ 1,500; it merged via the same-name rule because the first matcher version rejected the non-descriptive pin name; the final matcher accepts that case, checked against the live topic) · `--compact --dry-run --threshold 300` → 441 → 376 chars, `dry_run` · `delete` **ok** · the empty day row deleted as the bot · board left with only the welcome note |
+
+Matching with a 2B model is the weak spot: it **misses** some follow-ups (they become a new pin) but, with the
+confirmation rules, it has not merged into a wrong topic in any test. Merge duplicate pins by hand when it happens.
 
 ## 3. The silence-detection loop
 
@@ -318,7 +343,7 @@ In words:
 ### 3.4 Pseudocode
 
 This is pseudocode, not a runnable script. `reader` is the adapter from [§2](#2-reading-the-transcript-rest-reads-verified);
-`summarize` is described in [§4.1](#41-summary).
+`summarize` is described in [§4.1](#41-topic-papers-one-living-summary-per-topic) and [§4.1a](#41a-summary-rules-all-commands).
 
 ```text
 CONFIG
@@ -419,7 +444,28 @@ check_result(st):
 
 ## 4. Summarize and push to the inbox
 
-### 4.1 Summary
+### 4.1 Topic papers (one living summary per topic)
+
+- **One paper per topic:** the pin is the topic; its **page 1** (first by `position`, then `created_at`) is one
+  living summary. Other pages on that pin are left alone.
+- **Merge instead of add:** when a chat has gone quiet, the poller reads the board's topics (public anon key,
+  read-only, the `MAX_TOPICS` = 40 most recently updated; the welcome note is excluded via `TOPICS_EXCLUDE`) and asks
+  the local model whether the chat matches one of them. Its answer is constrained by a JSON-schema **enum of
+  `"NEW"` + the exact topic names**; it sees each name with its first summary line. A pick only counts if it is
+  confirmed (yes/no on "subject A belongs in note B", then the same question on the summary text alone, then ≥ 3
+  shared distinctive words); otherwise NEW. Wrong merges are worse than duplicate pins, so ties go to NEW.
+  - **Matched:** current page 1 + the new chat → merged summary → `edit` page 1 of that pin, with the **exact**
+    day and pin title from the board read and `pageNumber: 1`.
+  - **NEW:** summary of the chat → `add` a new pin with page title `Summary` on the NY date the chat started. If the
+    suggested pin name equals an existing topic, it is merged into that topic instead.
+  - **Resumed conversation:** only the messages after the last post are merged into the topic it already wrote to.
+  - A topic with another conversation's command still waiting for its result is not touched until the result is in.
+- **Hard cap: 1,500 characters** per summary. Order: **decisions, open to-dos, latest facts** first; newer statements
+  replace older ones; facts only. If the model overshoots: repeated sentences are dropped, then it is re-asked **once**
+  with stricter wording (≤ 1,200), then the text is cut at a sentence/line boundary.
+- **Privacy:** the log records ids, counts, lengths and statuses; never the chat, the summary or the subject.
+
+### 4.1a Summary rules (all commands)
 
 - **Input:** the full conversation (both sides). **Output:** `pin` (1–4 word topic), `title`, and `body`.
 - **Who summarizes** depends on the reader: with option B, Grok does it inside the Automation; with the REST/browser reader (C1/C2) you
@@ -432,8 +478,8 @@ check_result(st):
   - the text also stays in the public repo's `inbox` branch history (command and result files), even after the note
     is deleted from the board. Only a history rewrite of that branch removes it;
   - `pin` ≤ 200 characters, `title` ≤ 200, `body` ≤ 5000 (`post.mjs` rejects longer values with `error_invalid`).
-- **Page title:** make it unique and stable, e.g. `Drive 9:15 PM` (the conversation's start time in New York).
-  Later edits find the page by this exact title.
+- **Page title:** with topic papers it is `Summary`, and edits find page 1 by `pageNumber: 1` on the exact day + pin.
+  (Before topic papers each drive got its own page titled e.g. `Drive 9:15 PM`.)
 - **Pin:** when it's the same subject as a note from earlier the same day, reuse that pin's **exact** title (keep the
   titles you've posted in state). `add` ignores case, spaces, accents and punctuation, so "garage shelves" lands on
   "Garage Shelves". Typos are forgiven only narrowly: both titles need the same number of words, at most 2 words may
@@ -447,19 +493,20 @@ Allowed fields: `op`, `date`, `pin`, `title`, `body`, `color`, `target`, `page`,
 Don't add other fields: `post.mjs` ignores them, so they'd only give a false sense that something is tracked.
 Keep the automation's bookkeeping in its own state.
 
-**First post of a conversation (`add`):** file `inbox/auto-3f9c2a71d0-20261006T011512Z-add.json`
+**A new topic (`add`):** file `inbox/auto-3f9c2a71d0-20261006T011512Z-add.json`
 
 ```json
 {
   "op": "add",
   "date": "2026-10-05",
   "pin": "Garage shelves",
-  "title": "Drive 9:15 PM",
-  "body": "Plan: 3 shelves on the left wall, 16 in deep.\nBuy 2x4s and brackets Saturday.\nAsk about a stud finder."
+  "title": "Summary",
+  "body": "- Decision: 3 shelves on the left wall, 16 in deep.\n- To do: buy 2x4s and brackets Saturday.\n- To do: find a stud finder."
 }
 ```
 
-**The same conversation continued and went quiet again (`edit`):** file `inbox/auto-3f9c2a71d0-20261006T013840Z-edit.json`
+**A later chat about the same topic, or the same conversation resumed (`edit` of page 1):** file
+`inbox/auto-7d01e5aa42-20261008T221040Z-edit.json`
 
 ```json
 {
@@ -467,14 +514,14 @@ Keep the automation's bookkeeping in its own state.
   "target": "page",
   "date": "2026-10-05",
   "pin": "Garage shelves",
-  "page": "Drive 9:15 PM",
-  "body": "Plan: 3 shelves on the left wall, 16 in deep.\nBuy 2x4s and brackets Saturday.\nStud finder: borrow from Sam.\nAlso: add a pegboard above the bench."
+  "pageNumber": 1,
+  "body": "- Decision: 3 shelves on the left wall, 16 in deep; pegboard above the bench.\n- To do: buy 2x4s and brackets Saturday.\n- Stud finder: borrow from Sam."
 }
 ```
 
-For the edit, `pin` must be the **exact** pin title from the first result (`matched.pinTitle`), because the add may
-have fuzzy-matched an existing pin with slightly different wording. `page` must be the exact page title, or use
-`pageNumber` instead (exactly one of the two). Page numbers can shift if earlier pages are deleted, so the title is safer.
+For the edit, `date` is the topic's own day (not today) and `pin` the **exact** pin title, both from the board read
+(or from the add's result, `matched.pinTitle`), because `post.mjs` never guesses on edits. Page 1 is addressed by
+`pageNumber: 1` (exactly one of `page` / `pageNumber`).
 
 **Result files** appear at `inbox/results/<same name>.json` with `status`, `op`, `input`, `matched`, `message` and
 `processedAt`, plus `date` (missing on `error` and `error_invalid`) and `pageNumber` (on `ok` and `skipped_duplicate`
@@ -486,7 +533,7 @@ for adds, and on `ok` for page edits and deletes; never on pin edits or the othe
 | `ok` | record `board` and `lastPostedTs` |
 | `skipped_duplicate` | a page with the same title and text was added to that pin in the last 10 min: treat as posted. The result reports that page's `pageNumber` and `matched.pageId`, and its title is the one you sent (dedup needs the same title) |
 | `skipped_ambiguous` | the topic could match several pins (listed in `candidates`), or a pin rename clashes with another pin's title: alert. The automation can't choose; a person renames or merges pins on the board, then resets the conversation (which bumps `retry`) |
-| `skipped_not_found` | an edit found no page (you deleted or renamed it, or its pin): forget `board`; the next poll posts a fresh `add`, whose `-add` file name doesn't collide with the edit's |
+| `skipped_not_found` | an edit found no page (you deleted or renamed it, or its pin): forget `board`; the next poll matches again and, if NEW, posts a fresh `add`, whose `-add` file name doesn't collide with the edit's |
 | `error_invalid` | bug in the command (too long, wrong field): alert; don't retry the same file |
 | `error` | auth, network or database failure in the Action: the command file is **kept**. Alert once and keep `pending`, then re-run the workflow: the re-run rewrites the same result file, which the automation is still watching |
 
@@ -521,6 +568,26 @@ for adds, and on `ok` for page edits and deletes; never on pin edits or the othe
     bypass set to *For pull requests only* (the token acts as you) and the enforcement status *Active*; see
     [setup-checklist.md](setup-checklist.md) step 2. A Contents-write token can still merge an open pull request from
     a post-it-board branch, so don't leave those open.
+
+### 4.4 Weekly compaction
+
+Merging keeps each summary under 1,500 characters, but a hand edit or an older paper can be longer, and papers
+drift towards the cap. Once a week:
+
+```bash
+node /workspace/how-to-post-it/poller/poller.mjs --compact            # add --json for a machine-readable report
+node /workspace/how-to-post-it/poller/poller.mjs --compact --dry-run  # report only, nothing pushed
+```
+
+- Selects page-1 summaries **over the threshold** (`--threshold`, `COMPACT_THRESHOLD`, default **1500**) and
+  rewrites each to about **1,000** characters (`--target`, `COMPACT_TARGET`; never above ⅔ of the threshold), facts
+  only, same order and cap rules as §4.1. A rewrite that isn't shorter is skipped (`skipped_not_shorter`).
+- Pushes `edit` page 1 commands through the inbox (`inbox/compact-<hash of the pin id>-<UTC stamp>.json`) and
+  waits for their results.
+- **No collision with the loop:** it holds the model lock (`model.lock`, waits up to `--lock-wait` s, default 600)
+  and waits until the loop has no command waiting for a result; the loop defers while compaction holds the model.
+- Report: topics checked, over threshold, compacted, failed, and per topic `before → after` chars and status.
+  Exit 0 = ok, 1 = a topic failed, **75 = skipped** (busy; run again later).
 
 ## 5. How it fits with the inbox workflow and its secrets
 
