@@ -259,6 +259,60 @@ The poller now writes **topic papers** ([§4.1](#41-topic-papers-one-living-summ
 Matching with a 2B model is the weak spot: it **misses** some follow-ups (they become a new pin) but, with the
 confirmation rules, it has not merged into a wrong topic in any test. Merge duplicate pins by hand when it happens.
 
+### 2.9 Matching recall, numbers guardrail and auth backoff (Oct 12, 2026)
+
+Review follow-up ([issue #8](https://github.com/mogesjohnson/how-to-post-it/issues/8)). All real-model numbers are
+from Qwen3.5-2B Q4_K_M on the box, which was heavily loaded by other jobs at the time (load ~5–9), so per-call
+times are inflated.
+
+**Topic matching.** New suite `poller/test/fixtures/match-suite.json`: 6 topics, 26 synthetic chats (15 follow-ups,
+11 unrelated, 14 of them deliberately hard: no shared title words, or near misses such as houseplants vs a garden
+plot, kitchen cabinets vs garage shelves, a cooking podcast vs a bike podcast). `node poller/test/match-eval.mjs`
+prints per-case verdicts and exits 1 on any wrong merge.
+
+| Matcher | Follow-ups matched | Unrelated kept NEW | Wrong merges |
+|---|---|---|---|
+| Before (subject confirm → summary-only confirm → ≥ 3 shared words) | 12/15 | 9/11 | **2** (houseplant → Garden plot via the summary-only confirm; kitchen cabinets → Garage shelves via 3 shared ordinary words) |
+| After, run 1 | 13/15 | 11/11 | **0** |
+| After, run 2 | 14/15 | 11/11 | **0** |
+| After + shared-word gate (final code) | 13/15 | 11/11 | **0** |
+| `model-merge.mjs` 8-chat suite (before → after) | 6/8 correct, 2 missed → **8/8** | | 0 → 0 |
+
+What changed: the subject check got four worked same/different examples; the summary-only second opinion was
+replaced by a **context** check (note name + summary ≤ 400 chars vs the chat itself ≤ 800); the "≥ 3 shared words"
+rule became an **anchored** overlap (≥ 2 shared, ≥ 1 anchor = a digit token or a name capitalized in both texts,
+≥ 1 ordinary word, unique best topic); and every acceptance now needs **≥ 1 shared distinctive word** with the pick,
+because one regression run "confirmed" the car-service chat for the bike podcast with zero words in common. The
+two remaining misses (a mildew chat, an accountant chat) share no anchor with their topic; a looser "≥ 4 ordinary
+words" rule would catch them but was rejected as tuned to this suite. A miss costs a duplicate pin; merge by hand.
+
+**Numbers guardrail.** The prompt now says to copy numbers, times and dates exactly and never add am/pm, a weekday,
+a year or a unit. After every summary, merge and compaction the poller checks that each number/time in the output
+appears in the source (transcript, or current summary + transcript); an invented am/pm is stripped
+deterministically, other unsupported numbers trigger one re-ask, and a sentence/bullet still carrying one is
+dropped (never the whole body). The log records only counts (`amPmFixed`, `numbersDropped`).
+`node poller/test/guard-eval.mjs --runs 2` (4 transcripts × 2 runs, old prompt vs new prompt):
+
+| Prompt | Summaries with invented am/pm (instances) | Unsupported other numbers | Left after the guard |
+|---|---|---|---|
+| Old | 2/8 (4) | 0 | 0 |
+| New | 3/8 (5) | 0 | 0 |
+
+So the prompt tightening alone made **no measurable difference** with this 2B model; the deterministic post-check
+is what removes the invented "pm"/"am" (all instances fixed in both variants).
+
+**Auth backoff.** 401/403, an HTML/Cloudflare challenge and a login redirect all set health `kind: "auth"` and stop
+the cycle (no more grok.com requests that poll). Backoff doubles up to `AUTH_MAX_BACKOFF_SECONDS` (default 1800):
+90, 180, 360, 720, 1440, 1800 s…, i.e. at most 6 list requests in the first hour and 2 per hour after, until a new
+cookie is set. Covered by unit tests (`node poller/test/run.mjs auth`).
+
+**Board:** `post.mjs` accepts `{"op":"delete","target":"day","date":…}`, which deletes a day only when it has no
+pins (`skipped_not_empty` otherwise), so cleaning up after deleting a day's last pin no longer needs a manual REST
+call ([post-it-board #5](https://github.com/mogesjohnson/post-it-board/pull/5)).
+
+**Repo:** `main` of this repo is protected by a ruleset like post-it-board's (changes via pull request, no force
+push, no deletion); see the README's "Contributing" section.
+
 ## 3. The silence-detection loop
 
 ### 3.1 State per conversation
@@ -451,9 +505,10 @@ check_result(st):
 - **Merge instead of add:** when a chat has gone quiet, the poller reads the board's topics (public anon key,
   read-only, the `MAX_TOPICS` = 40 most recently updated; the welcome note is excluded via `TOPICS_EXCLUDE`) and asks
   the local model whether the chat matches one of them. Its answer is constrained by a JSON-schema **enum of
-  `"NEW"` + the exact topic names**; it sees each name with its first summary line. A pick only counts if it is
-  confirmed (yes/no on "subject A belongs in note B", then the same question on the summary text alone, then ≥ 3
-  shared distinctive words); otherwise NEW. Wrong merges are worse than duplicate pins, so ties go to NEW.
+  `"NEW"` + the exact topic names**; it sees each name with its first summary line. A pick only counts if the chat
+  shares ≥ 1 distinctive word with it and it is confirmed (yes/no with worked examples on "subject A belongs in
+  note B", then yes/no on the note's summary vs the chat itself, then an anchored word overlap; see
+  [§2.9](#29-matching-recall-numbers-guardrail-and-auth-backoff-oct-12-2026)); otherwise NEW. Wrong merges are worse than duplicate pins, so ties go to NEW.
   - **Matched:** current page 1 + the new chat → merged summary → `edit` page 1 of that pin, with the **exact**
     day and pin title from the board read and `pageNumber: 1`.
   - **NEW:** summary of the chat → `add` a new pin with page title `Summary` on the NY date the chat started. If the
@@ -667,7 +722,7 @@ implement it in `ara_post_point()`, which returns where the unposted part of the
 | **Transcript read failure / schema change** (endpoint changed, fields missing, page layout changed) | Reader errors or returns nothing | **Health check** ([below](#health-check-and-reader-failover)): alert once per failure type, back off, keep retrying. Since conversations stay in history, a later successful read catches up. The **most likely** failure for C1; the `READER` flag can fail over to C2 |
 | **Anti-bot / challenge page** (Cloudflare, CAPTCHA, rate notice from grok.com) | A challenge/HTML instead of JSON, or an unusual status | **Stop and alert. Never auto-solve, rotate IPs, or bypass** ([§2.3](#23-what-xais-terms-say)). Optionally fail over `rest`->`browser`, which is less likely to be challenged, and lengthen the poll interval |
 | **Partial transcript** (sync not finished yet) | Summary missing the last turns | The conversation goes back to Active when more messages arrive, and the next quiet period sends an **edit** with the full summary |
-| **Auth expiry** (grok.com cookie/profile expired, 2FA prompt, GitHub token expired or revoked) | Read fails / `401`/`403`; for C1 the cookie needs re-extracting, for C2 the profile needs re-login | Alert ("sign in to Grok again" / "renew token"). Keep unposted state; nothing is lost while it waits. The signed-in **browser profile (C2) renews cookies on its own**, so it needs manual re-login less often than raw cookies (C1). Calendar reminder before the GitHub token expires |
+| **Auth expiry** (grok.com cookie/profile expired, 2FA prompt, GitHub token expired or revoked) | Read fails / `401`/`403`; for C1 the cookie needs re-extracting, for C2 the profile needs re-login | Alert ("sign in to Grok again" / "renew token"). The poller backs off up to `AUTH_MAX_BACKOFF_SECONDS` (30 min) so it never hammers grok.com while signed out. Keep unposted state; nothing is lost while it waits. The signed-in **browser profile (C2) renews cookies on its own**, so it needs manual re-login less often than raw cookies (C1). Calendar reminder before the GitHub token expires |
 | **Rate limits** (grok.com limits undocumented and may be enforced "at our sole discretion"; GitHub REST: ~5,000 requests/hour per token plus secondary write limits) | `429`/`403` with retry headers | Poll gently (list cheaply only while active, back off when idle), never run parallel reads, honour `Retry-After`. One inbox push per finished conversation is far below GitHub's limits |
 | **GitHub push failure** (network, 409/422 because the Action pushed at the same moment) | PUT fails | Retry *push if absent* with backoff. The name is deterministic, so retries can't duplicate |
 | **Action failure** (`error` in `inbox/results/<name>.json`, or a red run in the post-it-board Actions tab) | Result `error`, or no result at all after ~10 min | The workflow **keeps** the command file on `error`. Fix the cause (e.g. bot password rotated without updating the secret) and re-run the workflow (it has `workflow_dispatch`). The automation alerts once and keeps waiting on the same result file, which the re-run rewrites; it also alerts if no result appears |

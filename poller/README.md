@@ -52,24 +52,40 @@ Every `POLL_SECONDS` (default 90, clamped to 60–120):
 2. **Match** (one `llama-server` session for the whole decision): the model sees each topic's **name + first line**
    and the transcript, writes the chat's subject in a few words, and picks from a JSON-schema **enum of
    `"NEW"` + the exact topic names**, so it cannot invent a name. A 2B model over-matches when forced to choose,
-   so a pick is only accepted if it is **confirmed**:
-   - a yes/no question "does subject A belong in note B (name + first line)?"; if no,
-   - the same question with B = the summary text alone (pin names like "Poller test topic" say nothing); if no,
-   - ≥ 3 distinctive words shared by the chat and the topic (and no other topic sharing as many).
-   Otherwise the answer is **NEW**. A missed match only costs a duplicate pin; a wrong match would put facts into an
+   so a pick is only accepted if it is **confirmed**. First, the chat must share **at least one distinctive word**
+   with the picked topic (the yes/no checks alone once "confirmed" a car-service chat for a bike podcast with zero
+   words in common); then:
+   - a yes/no question "does subject A belong in note B (name + first line)?", with four worked examples of
+     same-thing / different-thing pairs; if no,
+   - a yes/no question with **full context**: the note's name + summary (≤ 400 chars) and the chat itself
+     (≤ 800 chars), "does the new chat continue this note?"; if no,
+   - **anchored word overlap**: ≥ 2 distinctive words shared by the chat and the topic, of which ≥ 1 is an
+     *anchor* (a token with a digit such as `1099`, `2x4s`, `16`, or a name capitalized in both texts such as
+     `Dana`, `Shinjuku`; weekdays and months don't count) and ≥ 1 is an ordinary word, and no other topic shares as
+     many. Ordinary words alone are not enough: a kitchen-cabinet chat shares "stud finder" and "brackets" with a
+     garage-shelves topic.
+   Otherwise the answer is **NEW**. Measured with `node poller/test/match-eval.mjs` on 26 synthetic chats
+   (`test/fixtures/match-suite.json`: 15 follow-ups, 11 unrelated incl. near misses): follow-ups matched
+   12/15 → **13–14/15**, unrelated kept NEW 9/11 → **11/11**, wrong merges 2 → **0** (results in docs §2.9). A missed match only costs a duplicate pin; a wrong match would put facts into an
    unrelated paper, so the rules lean towards NEW. If the NEW summary's pin name equals an existing topic, it is
    merged into that topic anyway.
 3. **Merge**: current page 1 + the new transcript → one updated summary: decisions first, then open to-dos, then the
    latest facts; a newer statement replaces an older one; facts only.
-4. **Hard cap 1,500 characters** (`TOPIC_CAP`), for new summaries, merges and compaction alike: repeated
+4. **Numbers guardrail** (for new summaries, merges and compaction): every number and am/pm time in the summary must
+   appear in the source (the transcript; for a merge also the current summary; numbers written as words count:
+   "forty dollars", "May first", "7 in the evening"). An am/pm the speaker never said is removed ("leave by 11"
+   → model wrote "11pm" → "11"). Any other unsupported number: the model is asked **once** to remove it; if it is
+   still there, the sentence or bullet holding it is dropped (never the whole summary). The prompt also says to
+   copy numbers, times and dates exactly. The log records counts only (`amPmFixed`, `numbersDropped`).
+5. **Hard cap 1,500 characters** (`TOPIC_CAP`), for new summaries, merges and compaction alike: repeated
    sentences are dropped first (a small model can loop); if still over, the model is asked **once** more with
    stricter wording ("at most 1200 characters"); if still over, the text is **cut at a sentence/line boundary**. The
    log records `firstLength`, `reasked`, `truncated` and the final length (never the text).
-5. **Write**: matched → `{"op":"edit","target":"page","date":"<the topic's day>","pin":"<exact pin title>","pageNumber":1,"body":"…"}`;
+6. **Write**: matched → `{"op":"edit","target":"page","date":"<the topic's day>","pin":"<exact pin title>","pageNumber":1,"body":"…"}`;
    NEW → `{"op":"add","date":"<NY date the chat started>","pin":"…","title":"Summary","body":"…"}`.
    A topic that has a command from another conversation still waiting for its result is not touched until that
    result is in (the conversation waits for the next poll).
-6. **Resume**: when a posted conversation continues and goes quiet again, only the messages **after** the last post
+7. **Resume**: when a posted conversation continues and goes quiet again, only the messages **after** the last post
    are merged into the same topic (no new match). If that topic was deleted meanwhile, the chat is matched again.
 
 ### Loading messages (the exact request shape)
@@ -153,7 +169,11 @@ Written every loop. `kind` is one of:
 | `push` | GitHub API failure (`401`/`403` = token expired, revoked or missing Contents: write) | renew `INBOX_GITHUB_TOKEN` |
 | `board` | the board's topics can't be read (config.js unreachable, Supabase error, a non-anon key) | usually transient; check the site / `BOARD_CONFIG` |
 
-Failures back off exponentially from the poll interval up to `MAX_BACKOFF_SECONDS` (600).
+Failures back off exponentially from the poll interval up to `MAX_BACKOFF_SECONDS` (600); **auth** failures up to
+`AUTH_MAX_BACKOFF_SECONDS` (1800), since retrying can't fix an expired cookie or a challenge (a new `GROK_COOKIE`
+needs a restart anyway): 90 s, 3, 6, 12, 24, then every 30 min, i.e. ≤ 6 requests in the first hour and 2 per hour
+after that. A failing cycle stops at the first failing request (it never goes on to the other conversations), and
+redirects are never followed. `node poller/test/run.mjs auth` runs these checks.
 `node poller/poller.mjs --health` (or `poller/start.sh status`) prints it and exits **1** if the last loop failed or
 the heartbeat is stale (no loop for ~12 min).
 
@@ -211,10 +231,12 @@ an error.
 node poller/test/run.mjs     # unit tests, synthetic fixtures, no network except a local fake server
 ```
 
-Real-model check of the topic flow on synthetic chats (match / NEW, merge, cap, compaction; ~1.5 min):
+Real-model checks on synthetic chats (each starts the local model once):
 
 ```bash
-node poller/test/model-merge.mjs
+node poller/test/model-merge.mjs   # topic flow: NEW, match, merge, cap, compaction (~1.5 min)
+node poller/test/match-eval.mjs    # matching accuracy on test/fixtures/match-suite.json (~2.5 min); exit 1 on a wrong merge
+node poller/test/guard-eval.mjs    # numbers guardrail: invented am/pm and numbers, old vs new prompt
 ```
 
 Mock end to end (fake grok.com + real local model, nothing pushed):

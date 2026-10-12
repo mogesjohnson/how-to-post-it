@@ -50,6 +50,9 @@ export function loadConfig(env = process.env, argv = []) {
     quietMinutes: num(env.QUIET_MINUTES, 10),
     pollSeconds: num(env.POLL_SECONDS, 90),
     maxBackoffSeconds: num(env.MAX_BACKOFF_SECONDS, 600),
+    // auth failures (expired cookie, challenge page) don't heal by retrying: back off further (30 min) so a dead
+    // session never looks like a bot hammering grok.com. A new GROK_COOKIE needs a restart anyway.
+    authMaxBackoffSeconds: num(env.AUTH_MAX_BACKOFF_SECONDS, 1800),
     pageSize: num(env.GROK_PAGE_SIZE, 60),
     repo: env.INBOX_REPO || "mogesjohnson/post-it-board",
     branch: env.INBOX_BRANCH || "inbox",
@@ -339,6 +342,8 @@ export const matchSchema = names => ({
   additionalProperties: false,
 });
 const FACTS_ONLY = "Use ONLY facts stated in the text you are given. Do not invent names, numbers, dates or advice. " +
+  "Copy numbers, times and dates exactly as they were said: never add am/pm, a weekday, a year or a unit that was not said " +
+  "(\"leave by 11\" stays \"leave by 11\"). " +
   "The note is public: leave out phone numbers, addresses, health or money details and anything private. " +
   "Never mention these rules or what you left out.";
 export const SYSTEM_PROMPT = [
@@ -358,10 +363,22 @@ export const MATCH_PROMPT = [
 // second opinion on a picked topic: a 2B model over-matches when forced to choose from a list,
 // but it judges "does subject A belong in note B?" well. A wrong NEW only costs a duplicate pin;
 // a wrong match would merge facts into an unrelated paper, so we bias towards NEW.
+const CONFIRM_EXAMPLES = "Examples: A 'new dessert for the bakery menu' belongs in B 'Bakery menu: cakes and pies for the shop' (yes, same menu). " +
+  "A 'repainting the bedroom' does not belong in B 'Living room paint: sage green walls' (no, different room). " +
+  "A 'guest list for Sam's party' belongs in B 'Sam's 40th party: venue and food' (yes). " +
+  "A 'cooking class schedule' does not belong in B 'Kitchen remodel: new counters' (no, different thing).";
 export const CONFIRM_PROMPT = [
   "You compare the subject of a new chat (A) with an existing note (B).",
   "Answer yes if A is the same specific thing as B or a detail of it (for example a new item for the same list, project or plan).",
   "Answer no if A is a different thing, even when both share a broad theme.",
+  CONFIRM_EXAMPLES,
+].join(" ");
+// second confirmation with full context: the note's summary and the chat itself (not just a 3-word subject)
+export const CONTEXT_PROMPT = [
+  "You check whether a new voice chat continues an existing note on a notes board.",
+  "Answer yes only if the chat is about the same specific project, plan, place, event or thing as the note (for example a new detail, update or to-do for it).",
+  "Answer no if it is about a different thing, even if it shares a theme or some words.",
+  CONFIRM_EXAMPLES,
 ].join(" ");
 export const confirmSchema = { type: "object", properties: { answer: { type: "string", enum: ["yes", "no"] } }, required: ["answer"], additionalProperties: false };
 export const MERGE_PROMPT = [
@@ -428,33 +445,144 @@ export function truncateAtBoundary(text, cap = TOPIC_CAP) {
   return head.slice(0, sp > 0 ? sp : cap - 1).trimEnd() + "…";
 }
 
-// First line of a topic summary, for the topic list the matcher sees
-// Distinctive words shared by a transcript and a topic (name + summary). Used as a deterministic tie-breaker
-// when the model picked a topic but its yes/no confirmation said no: on the synthetic suite true follow-ups share
-// 3-18 such words with their topic, unrelated chats 0-1.
+// Word overlap between a chat and a topic (name + summary): a deterministic last check when the model picked a
+// topic but both yes/no confirmations said no. Shared words alone are not enough (a kitchen-cabinet chat shares
+// "stud finder" and "brackets" with a garage-shelves topic), so at least one shared word must be an ANCHOR: a token
+// with a digit ("1099", "2x4s", "16") or a name written with a capital letter in both texts ("Dana", "Shinjuku").
+// Weekday and month names are not anchors (too common). Measured on test/fixtures/match-suite.json.
 const STOPWORDS = new Set(("that this with have from your what when will would about there their they them then than just also into only " +
   "some more like make need needs want okay sure yeah good great thanks thank does done dont doesnt it's that's here been being were very much " +
   "each other these those which while should could before after today tomorrow yesterday week next last right maybe really thing things " +
-  "know think going something user grok").split(" "));
+  "know think going something user grok decision todo").split(" "));
+const CALENDAR = new Set("monday tuesday wednesday thursday friday saturday sunday january february march april may june july august september october november december".split(" "));
+const stem = w => w.replace(/'s$/, "").replace(/ies$/, "y").replace(/(ing|ed|es|s)$/, "");
 export function topicWords(text) {
   const out = new Set();
   for (const w of String(text || "").toLowerCase().match(/[a-z0-9$]+/g) || []) {
+    if (/\d/.test(w)) { if (w.length >= 2) out.add(w); continue; }
     if (w.length < 4 || STOPWORDS.has(w)) continue;
-    out.add(w.replace(/(es|s)$/, ""));
+    out.add(stem(w));
   }
   return out;
 }
-export const MATCH_MIN_SHARED = 3;
-export function sharedWords(transcript, topic) {
-  const tw = topicWords(`${topic.pinTitle}\n${topic.page1?.body || ""}`), cw = topicWords(transcript);
-  let n = 0; for (const w of tw) if (cw.has(w)) n++;
-  return n;
+function capitalized(text) {
+  const out = new Set();
+  for (const m of String(text || "").matchAll(/\b([A-Z][a-z][A-Za-z']*)/g)) {
+    const w = stem(m[1].toLowerCase());
+    if (!CALENDAR.has(w) && w !== "user" && w !== "grok") out.add(w);
+  }
+  return out;
 }
+export const MATCH_MIN_SHARED = 2, MATCH_MIN_ANCHORS = 1, MATCH_MIN_SHARED_ANY = 1;
+// -> {shared: n, anchors: n} (counts only; the words themselves come from chat text and are never logged)
+export function overlap(transcript, topic) {
+  const tText = `${topic.pinTitle}\n${topic.page1?.body || ""}`;
+  const tw = topicWords(tText), cw = topicWords(transcript);
+  const capT = capitalized(tText), capC = capitalized(transcript);
+  let shared = 0, anchors = 0;
+  for (const w of tw) if (cw.has(w)) { shared++; if (/\d/.test(w) || (capT.has(w) && capC.has(w))) anchors++; }
+  return { shared, anchors };
+}
+export const sharedWords = (transcript, topic) => overlap(transcript, topic).shared;
 
 export function topicGist(body, n = 120) {
   const line = String(body || "").split("\n").map(l => l.replace(/^\s*[-*•]\s*/, "").trim()).find(Boolean) || "";
   return clip(line, n);
 }
+
+/* ---------- number / time guardrail ----------
+ * A 2B model sometimes "completes" facts: "leave by 11" became "leave by 11pm". Every number and every am/pm time in
+ * a summary must be supported by its source text (the transcript, plus the current summary for a merge):
+ *   1. a time whose number was said but whose am/pm was not ("11pm" from "by 11") loses the am/pm (deterministic);
+ *   2. other unsupported numbers: the model is asked once to remove them;
+ *   3. still unsupported: the sentence / bullet that holds them is dropped (never the whole summary).
+ * Numbers in the source may be written as words ("forty dollars", "May first", "ten by ten").
+ */
+const NUM_WORDS = { zero: 0, one: 1, two: 2, three: 3, four: 4, five: 5, six: 6, seven: 7, eight: 8, nine: 9, ten: 10, eleven: 11, twelve: 12,
+  thirteen: 13, fourteen: 14, fifteen: 15, sixteen: 16, seventeen: 17, eighteen: 18, nineteen: 19, twenty: 20, thirty: 30, forty: 40,
+  fifty: 50, sixty: 60, seventy: 70, eighty: 80, ninety: 90, hundred: 100, thousand: 1000, dozen: 12, noon: 12, midnight: 12, half: 0.5 };
+const ORD_WORDS = { first: 1, second: 2, third: 3, fourth: 4, fifth: 5, sixth: 6, seventh: 7, eighth: 8, ninth: 9, tenth: 10, eleventh: 11,
+  twelfth: 12, thirteenth: 13, fourteenth: 14, fifteenth: 15, sixteenth: 16, seventeenth: 17, eighteenth: 18, nineteenth: 19, twentieth: 20, thirtieth: 30 };
+const TENS = { twenty: 20, thirty: 30, forty: 40, fifty: 50, sixty: 60, seventy: 70, eighty: 80, ninety: 90 };
+const MERIDIEM = /\b(\d{1,2})(?::(\d{2}))?\s*(a\.?\s?m\.?|p\.?\s?m\.?)(?![a-z])/gi;
+const WORD_MERIDIEM = /\b(one|two|three|four|five|six|seven|eight|nine|ten|eleven|twelve)\s*(?:o'?clock\s*)?(a\.?\s?m\.?|p\.?\s?m\.?)(?![a-z])/gi;
+const PART_OF_DAY = /\b(\d{1,2}|one|two|three|four|five|six|seven|eight|nine|ten|eleven|twelve)(?::(\d{2}))?\s*(?:o'?clock\s*)?(in the morning|in the afternoon|in the evening|at night|tonight|this morning|this evening)\b/gi;
+const mer = m => (/^a/i.test(m) ? "am" : "pm");
+const toNum = w => (/^\d/.test(w) ? Number(w) : NUM_WORDS[w.toLowerCase()]);
+// canonical numbers in a text: digits ("45,000" -> 45000, "1st" -> 1, "2x4s" -> 2, 4, "11:30" -> 11, 30) and number words
+export function numbersIn(text) {
+  const out = new Set();
+  const t = String(text || "").replace(/(\d),(?=\d{3}\b)/g, "$1");
+  for (const m of t.matchAll(/\d+(?:\.\d+)?/g)) out.add(String(Number(m[0])));
+  const lower = t.toLowerCase();
+  for (const m of lower.matchAll(/\b(twenty|thirty|forty|fifty|sixty|seventy|eighty|ninety)[\s-](one|two|three|four|five|six|seven|eight|nine|first|second|third|fourth|fifth|sixth|seventh|eighth|ninth)\b/g))
+    out.add(String(TENS[m[1]] + (NUM_WORDS[m[2]] ?? ORD_WORDS[m[2]])));
+  for (const m of lower.matchAll(/\b[a-z]+\b/g)) {
+    const w = m[0];
+    if (w in NUM_WORDS) out.add(String(NUM_WORDS[w])); else if (w in ORD_WORDS) out.add(String(ORD_WORDS[w]));
+  }
+  if (/\bnoon\b/.test(lower) || /\bmidnight\b/.test(lower)) out.add("12");
+  return out;
+}
+// canonical am/pm times in a text: "11pm", "11:30am", "eleven p.m.", "7 in the evening", "noon"
+export function timesIn(text) {
+  const out = new Set();
+  const t = String(text || "");
+  for (const m of t.matchAll(MERIDIEM)) out.add(`${Number(m[1])}${m[2] ? ":" + m[2] : ""}${mer(m[3])}`);
+  for (const m of t.matchAll(WORD_MERIDIEM)) out.add(`${toNum(m[1])}${mer(m[2])}`);
+  for (const m of t.matchAll(PART_OF_DAY)) out.add(`${toNum(m[1])}${m[2] ? ":" + m[2] : ""}${/morning/i.test(m[3]) ? "am" : "pm"}`);
+  if (/\bnoon\b/i.test(t)) out.add("12pm");
+  if (/\bmidnight\b/i.test(t)) out.add("12am");
+  return out;
+}
+// -> {body, checked, meridiemFixed, unsupported: [tokens]} (tokens are numbers/times only)
+export function checkNumbers(body, source) {
+  const srcNums = numbersIn(source), srcTimes = timesIn(source);
+  let meridiemFixed = 0;
+  // 1) "11pm" when only "11" was said -> "11"
+  body = String(body).replace(MERIDIEM, (all, h, mm, m, at, str) => {
+    const canon = `${Number(h)}${mm ? ":" + mm : ""}${mer(m)}`;
+    if (srcTimes.has(canon) || (!mm && srcTimes.has(`${Number(h)}:00${mer(m)}`))) return all;
+    if (srcNums.has(String(Number(h))) && (!mm || srcNums.has(String(Number(mm))))) {
+      meridiemFixed++;
+      // "at 9am. Next" -> "at 9. Next": the final dot of "am." also ended the sentence
+      const endsSentence = all.endsWith(".") && /^(\s+[A-Z(-]|\s*$)/.test(str.slice(at + all.length).split("\n")[0] || "");
+      return `${h}${mm ? ":" + mm : ""}${endsSentence ? "." : ""}`;
+    }
+    return all;
+  });
+  const unsupported = [];
+  let checked = 0;
+  // tokens are reported as written in the summary ("50,000", "7:30"), so dropUnsupported can find them again
+  for (const m of body.matchAll(/\d{1,3}(?:,\d{3})+(?!\d)|\d+(?:\.\d+)?/g)) {
+    checked++;
+    const n = String(Number(m[0].replace(/,/g, "")));
+    if (!srcNums.has(n) && !unsupported.includes(m[0])) unsupported.push(m[0]);
+  }
+  for (const m of body.matchAll(MERIDIEM)) {
+    const canon = `${Number(m[1])}${m[2] ? ":" + m[2] : ""}${mer(m[3])}`;
+    const tok = `${m[1]}${m[2] ? ":" + m[2] : ""}`;
+    if (!srcTimes.has(canon) && !unsupported.includes(tok)) unsupported.push(tok);
+  }
+  return { body, checked, meridiemFixed, unsupported };
+}
+// drop the sentences / bullets that contain an unsupported token; never returns an empty body
+export function dropUnsupported(body, tokens) {
+  if (!tokens.length) return { body, dropped: 0 };
+  const bad = piece => tokens.some(tok => new RegExp(`(^|[^0-9.])${tok.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")}(?![0-9])`).test(piece));
+  let dropped = 0;
+  const lines = String(body).split("\n").map(line => {
+    if (!bad(line)) return line;
+    const parts = line.match(/[^.!?]+(?:[.!?]+(?=\s|$)|$)\s*/g) || [line];
+    const kept = parts.filter(pt => { if (bad(pt)) { dropped++; return false; } return true; }).join("").trim();
+    return /^[-*•]?\s*$/.test(kept) ? null : (line.match(/^\s*[-*•]\s*/) && !/^\s*[-*•]/.test(kept) ? "- " + kept : kept);
+  }).filter(l => l !== null);
+  const out = tidy(lines.join("\n"));
+  return out.length >= 10 ? { body: out, dropped } : { body, dropped: 0, keptAll: true };
+}
+export const NUMBER_FIX = toks =>
+  `These numbers or times in the summary are NOT in the conversation: ${toks.join(", ")}. ` +
+  "Rewrite the summary without them (remove them, or the detail they belong to). Keep everything else as it is. Do not add anything.";
 
 // Model operations on top of one chat-completion function. chat({system, user, schema, maxTokens}) -> parsed JSON.
 // Kept separate from llama.cpp so tests can script the model's answers.
@@ -474,6 +602,28 @@ export function createModelOps(chat, { cap = TOPIC_CAP, log = () => {} } = {}) {
     log("info", "cap", { what, ...info });
     return { body, ...info };
   }
+  // number/time guardrail (see checkNumbers): deterministic am/pm fix, one re-ask, then drop what is still unsupported
+  async function guarded(body, source, what) {
+    let c = checkNumbers(dedupeText(body), source);
+    const info = { checked: c.checked, meridiemFixed: c.meridiemFixed, unsupported: c.unsupported.length, numbersReasked: false, dropped: 0 };
+    body = c.body;
+    if (c.unsupported.length) {
+      info.numbersReasked = true;
+      const again = await chat({ system: COMPACT_PROMPT, user: `${NUMBER_FIX(c.unsupported)}\n\nSUMMARY:\n${body}`, schema: BODY_SCHEMA, maxTokens: 700 });
+      const b2 = String(again?.body || "").trim();
+      if (b2.length >= 10) { const c2 = checkNumbers(dedupeText(b2), source); info.meridiemFixed += c2.meridiemFixed; body = c2.body; c = c2; }
+      if (c.unsupported.length) { const d = dropUnsupported(body, c.unsupported); body = d.body; info.dropped = d.dropped; info.flagged = d.keptAll ? c.unsupported.length : 0; }
+    }
+    if (info.meridiemFixed || info.unsupported) log("info", "numbers guard", { what, ...info });
+    return { body, numbers: info };
+  }
+  // after the cap re-ask (which only sees the summary): deterministic part only
+  function recheck(capInfo, source) {
+    const c = checkNumbers(capInfo.body, source);
+    let body = c.body, dropped = 0;
+    if (c.unsupported.length) { const d = dropUnsupported(body, c.unsupported); body = d.body; dropped = d.dropped; }
+    return { ...capInfo, body, length: body.length, numbersAfterCap: c.meridiemFixed + dropped };
+  }
   return {
     chat,
     // -> {topic: "<exact existing name>" | "NEW"}
@@ -486,17 +636,21 @@ export function createModelOps(chat, { cap = TOPIC_CAP, log = () => {} } = {}) {
       if (topic !== "NEW" && !names.includes(topic)) throw new PollerError("summarizer", "topic match: answer outside the allowed list");
       if (topic === "NEW") return { topic, confirmed: null };
       const t = topics.find(x => x.pinTitle === topic);
-      // B = name + first line; if that says no, ask once more with the summary text alone, because a
-      // pin name that doesn't describe its content (e.g. renamed by hand) makes the model say no
-      const ask = async b => (await chat({ system: CONFIRM_PROMPT, user: `A: ${clip(String(r.subject || ""), 80)}\nB: ${b}\n\nDoes A belong in note B?`, schema: confirmSchema, maxTokens: 20 }))?.answer === "yes";
-      if (await ask(`${topic} (${topicGist(t.page1?.body)})`)) return { topic, confirmed: true };
-      if (t.page1?.body && await ask(clip(String(t.page1.body), 300))) return { topic, confirmed: true, by: "summary" };
-      // the model's own pick, backed by clear word overlap (and no other topic overlapping as much): accept
-      const shared = topics.map(x => ({ name: x.pinTitle, n: sharedWords(transcript, x) }));
-      const mine = shared.find(x => x.name === topic).n;
-      if (mine >= MATCH_MIN_SHARED && shared.every(x => x.name === topic || x.n < mine)) {
-        log("info", "match accepted by word overlap", { shared: mine });
-        return { topic, confirmed: true, by: "overlap" };
+      // 0) the chat must share at least one distinctive word with the pick: the yes/no checks below can be wrong on
+      //    their own (a car-service chat was once "confirmed" for a bike podcast with zero words in common)
+      // 1) subject vs name + first line; 2) the chat itself vs name + summary; 3) anchored word overlap.
+      // Each step can only accept the model's own pick; anything else ends as NEW.
+      const ov = topics.map(x => ({ name: x.pinTitle, ...overlap(transcript, x) }));
+      const mine = ov.find(x => x.name === topic);
+      if (mine.shared >= MATCH_MIN_SHARED_ANY) {
+        const ask = async (system, user) => (await chat({ system, user, schema: confirmSchema, maxTokens: 20 }))?.answer === "yes";
+        if (await ask(CONFIRM_PROMPT, `A: ${clip(String(r.subject || ""), 80)}\nB: ${topic} (${topicGist(t.page1?.body)})\n\nDoes A belong in note B?`)) return { topic, confirmed: true };
+        if (t.page1?.body && await ask(CONTEXT_PROMPT, `NOTE "${topic}":\n${clip(String(t.page1.body), 400)}\n\nNEW CHAT:\n${clip(transcript, 800)}\n\nDoes the new chat continue this note?`)) return { topic, confirmed: true, by: "context" };
+        // >= 1 anchor AND >= 1 ordinary shared word: a place name alone ("Maple Street") is not enough
+        if (mine.shared >= MATCH_MIN_SHARED && mine.anchors >= MATCH_MIN_ANCHORS && mine.shared > mine.anchors && ov.every(x => x.name === topic || x.shared < mine.shared)) {
+          log("info", "match accepted by anchored word overlap", { shared: mine.shared, anchors: mine.anchors });
+          return { topic, confirmed: true, by: "overlap" };
+        }
       }
       log("info", "match rejected by confirmation", { rejected: topic });
       return { topic: "NEW", confirmed: false, rejected: topic };
@@ -507,20 +661,24 @@ export function createModelOps(chat, { cap = TOPIC_CAP, log = () => {} } = {}) {
       const bad = validateSummary(r);
       if (bad) throw new PollerError("summarizer", `model output fails schema: ${bad}`);
       const s = cleanSummary(r);
-      const c = await capped(s.body, "new");
-      return { ...s, ...c, body: c.body };
+      const g = await guarded(s.body, transcript, "new");
+      const c = recheck(await capped(g.body, "new"), transcript);
+      return { ...s, ...c, body: c.body, numbers: g.numbers };
     },
     // -> {body (<= cap), ...capInfo}
     async merge(topicName, current, transcript) {
       const r = await chat({ system: MERGE_PROMPT, user: `TOPIC: ${topicName}\n\nCURRENT SUMMARY:\n${current}\n\nNEW CONVERSATION:\n${transcript}\n\nWrite the updated summary of the whole topic (at most ${cap} characters).`, schema: BODY_SCHEMA, maxTokens: 1000 });
       if (typeof r?.body !== "string" || !r.body.trim()) throw new PollerError("summarizer", "merge: model output has no body");
-      return capped(r.body, "merge");
+      const src = `${current}\n${transcript}`;
+      const g = await guarded(r.body, src, "merge");
+      return { ...recheck(await capped(g.body, "merge"), src), numbers: g.numbers };
     },
     // -> {body (<= cap), ...capInfo}
     async compact(topicName, current, target = 1000) {
       const r = await chat({ system: COMPACT_PROMPT, user: `TOPIC: ${topicName}\n\nRewrite this summary in about ${target} characters (never more than ${cap}).\n\nSUMMARY:\n${current}`, schema: BODY_SCHEMA, maxTokens: 700 });
       if (typeof r?.body !== "string" || !r.body.trim()) throw new PollerError("summarizer", "compact: model output has no body");
-      return capped(r.body, "compact");
+      const g = await guarded(r.body, current, "compact");
+      return { ...recheck(await capped(g.body, "compact"), current), numbers: g.numbers };
     },
   };
 }
@@ -933,7 +1091,7 @@ export function createPoller({ cfg, reader, summarizer, inbox, board, log = () =
       const pushed = await inbox.pushIfAbsent(name, cmd);
       st.pending = { file: name, lastTs: last.createTime, op: cmd.op, pushedAt: new Date(nowMs).toISOString(), cmd, topic: { date: cmd.date, pinTitle: cmd.pin }, how: w.how };
       st.status = "posting";
-      log("info", "pushed", { conv: st.convKey, file: name, op: cmd.op, how: w.how, chars: cmd.body.length, reasked: !!w.info?.reasked, truncated: !!w.info?.truncated, state: pushed.state, commit: pushed.commit?.slice(0, 7) });
+      log("info", "pushed", { conv: st.convKey, file: name, op: cmd.op, how: w.how, chars: cmd.body.length, reasked: !!w.info?.reasked, truncated: !!w.info?.truncated, amPmFixed: w.info?.numbers?.meridiemFixed || 0, numbersDropped: w.info?.numbers?.dropped || 0, state: pushed.state, commit: pushed.commit?.slice(0, 7) });
       save();
       if (pushed.state === "processed") await checkPending(conv.id, st);
       return w.how === "new" ? "pushed_new" : "pushed_merge";
@@ -1078,16 +1236,17 @@ export function backoffSeconds(failures, pollSeconds, maxSeconds = 600, retryAft
   return Math.max(b, Math.min(retryAfterSec || 0, 3600));
 }
 
+export const maxBackoffFor = (kind, cfg) => (kind === "auth" ? Math.max(cfg.maxBackoffSeconds, cfg.authMaxBackoffSeconds || 0) : cfg.maxBackoffSeconds);
 // one loop iteration with health bookkeeping; returns how long to sleep (backoff on failures)
 export async function pollOnce(poller, cfg, log = () => {}) {
   try {
     const r = await poller.cycle();
     if (r.ok) return { ok: true, wait: cfg.pollSeconds };
-    return { ok: false, kind: r.error.kind, wait: backoffSeconds(poller.health.get().consecutiveFailures, cfg.pollSeconds, cfg.maxBackoffSeconds) };
+    return { ok: false, kind: r.error.kind, wait: backoffSeconds(poller.health.get().consecutiveFailures, cfg.pollSeconds, maxBackoffFor(r.error.kind, cfg)) };
   } catch (e) {
     const kind = e instanceof PollerError ? e.kind : "network";
     poller.health.fail(kind, e.message);
-    const wait = backoffSeconds(poller.health.get().consecutiveFailures, cfg.pollSeconds, cfg.maxBackoffSeconds, e.retryAfterSec);
+    const wait = backoffSeconds(poller.health.get().consecutiveFailures, cfg.pollSeconds, maxBackoffFor(kind, cfg), e.retryAfterSec);
     log("error", "poll failed", { kind, error: e.message, consecutiveFailures: poller.health.get().consecutiveFailures, retryInSec: wait });
     return { ok: false, kind, wait };
   }

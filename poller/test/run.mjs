@@ -366,42 +366,61 @@ test("match: JSON-schema enum = NEW + existing topic names; gists in the prompt;
   assert.deepEqual(await P.createModelOps(s.chat).match([], "x"), { topic: "NEW" }); assert.equal(s.seen.length, 0, "no topics: no model call");
 });
 
-test("match: the model's pick is kept when confirmation says no but the chat clearly shares the topic's words", async () => {
+test("match: the model's pick is kept when both confirmations say no but the chat shares an ANCHORED set of words", async () => {
   const T2 = [{ pinTitle: "Poller test topic", date: "2026-10-11", page1: { body: "- Plot 7 at Maple Street community garden.\n- Vegetables: peppers, zucchini, lettuce." } },
-    { pinTitle: "Bike podcast", date: "2026-10-04", page1: { body: "- Episode ideas: commuting tips." } }];
+    { pinTitle: "Bike podcast", date: "2026-10-04", page1: { body: "- Episode ideas: commuting tips with Dana." } }];
   const chat = "User: On plot 7 at the Maple Street garden I swapped zucchini for tomatoes.";
-  assert.ok(P.sharedWords(chat, T2[0]) >= P.MATCH_MIN_SHARED); assert.equal(P.sharedWords(chat, T2[1]), 0);
+  assert.deepEqual(P.overlap(chat, T2[0]), { shared: 5, anchors: 2 }); // plot, maple, street, garden, zucchini; Maple + Street
+  assert.deepEqual(P.overlap(chat, T2[1]), { shared: 0, anchors: 0 });
   let s = scriptedChat([{ subject: "garden plot", topic: "Poller test topic" }, { answer: "no" }, { answer: "no" }]);
   assert.deepEqual(await P.createModelOps(s.chat).match(T2, chat), { topic: "Poller test topic", confirmed: true, by: "overlap" });
-  // too little overlap (1-2 words) stays NEW
+  // a place name alone is not enough
   s = scriptedChat([{ subject: "street parking", topic: "Poller test topic" }, { answer: "no" }, { answer: "no" }]);
   assert.equal((await P.createModelOps(s.chat).match(T2, "User: parking on Maple Street is full today.")).topic, "NEW");
+  // many shared ordinary words but no anchor (kitchen cabinets vs garage shelves) stays NEW
+  const shelves = [{ pinTitle: "Garage shelves", page1: { body: "- Three shelves on the left garage wall, 16 inches deep.\n- Buy 2x4s and metal brackets.\n- Borrow a stud finder from Sam." } }];
+  const kitchen = "User: We're hanging the new kitchen cabinets this weekend. Do I need a stud finder and brackets?";
+  assert.deepEqual(P.overlap(kitchen, shelves[0]), { shared: 3, anchors: 0 });
+  s = scriptedChat([{ subject: "kitchen cabinets", topic: "Garage shelves" }, { answer: "no" }, { answer: "no" }]);
+  assert.equal((await P.createModelOps(s.chat).match(shelves, kitchen)).topic, "NEW");
+  // a person's name + an ordinary word is enough (Dana + record)
+  const podcast = [{ pinTitle: "Bike podcast", page1: { body: "- Record on Sundays with co-host Dana." } }];
+  assert.deepEqual(P.overlap("User: What microphone should Dana and I get for recording?", podcast[0]), { shared: 2, anchors: 1 });
+  // weekday / month names are never anchors; numbers are
+  assert.deepEqual(P.overlap("User: on Saturday I water", { pinTitle: "X", page1: { body: "Watering on Saturday" } }), { shared: 2, anchors: 0 });
+  assert.deepEqual(P.overlap("User: the 1099 form", { pinTitle: "Tax", page1: { body: "Find the 1099 forms" } }), { shared: 2, anchors: 1 });
   assert.equal(P.topicWords("User: Grok, today we need the hoses before Tuesday").has("today"), false);
-  assert.equal(P.topicWords("hoses").has("hos"), true, "plural folded");
+  assert.equal(P.topicWords("shelves").has("shelv") && P.topicWords("shelving").has("shelv"), true, "simple stemming");
 });
 
-test("match: a pick the confirmation rejects becomes NEW (bias against merging into an unrelated paper)", async () => {
+test("match: confirmations — subject check, then the chat itself in context; both no -> NEW (never a wrong merge)", async () => {
   const lines = [];
   let s = scriptedChat([{ subject: "garden plot", topic: "Garden Beds" }, { answer: "no" }, { answer: "yes" }]);
-  assert.deepEqual(await P.createModelOps(s.chat).match(TOPICS, "User: plot"), { topic: "Garden Beds", confirmed: true, by: "summary" });
-  assert.doesNotMatch(s.seen[2].user, /B: Garden Beds/, "second opinion: summary text without the pin name");
+  assert.deepEqual(await P.createModelOps(s.chat).match(TOPICS, "User: more soil for the cedar beds"), { topic: "Garden Beds", confirmed: true, by: "context" });
+  assert.match(s.seen[1].system, /Examples: /, "few-shot examples in the subject check");
+  assert.match(s.seen[2].user, /NOTE "Garden Beds":\n- Cedar beds[\s\S]*NEW CHAT:\nUser: more soil/, "second check sees the summary and the chat");
   s = scriptedChat([{ subject: "car oil change", topic: "Bike podcast" }, { answer: "no" }, { answer: "no" }]);
-  const r = await P.createModelOps(s.chat, { log: (lvl, msg, f) => lines.push(JSON.stringify({ msg, ...f })) }).match(TOPICS, "User: oil change for the car");
+  const r = await P.createModelOps(s.chat, { log: (lvl, msg, f) => lines.push(JSON.stringify({ msg, ...f })) }).match(TOPICS, "User: oil change for the car, episode ideas later");
   assert.equal(s.seen.length, 3);
   assert.deepEqual(r, { topic: "NEW", confirmed: false, rejected: "Bike podcast" });
   assert.ok(lines.some(l => l.includes("match rejected")));
   assert.ok(!lines.join("\n").includes("oil change"), "the subject (message-derived) is never logged");
+  // zero shared words: no confirmation can accept (a real run once "confirmed" a car chat for a bike podcast)
+  s = scriptedChat([{ subject: "car oil change", topic: "Bike podcast" }, { answer: "yes" }, { answer: "yes" }]);
+  assert.deepEqual(await P.createModelOps(s.chat).match(TOPICS, "User: oil change for the car"), { topic: "NEW", confirmed: false, rejected: "Bike podcast" });
+  assert.equal(s.seen.length, 1, "no confirmation calls when nothing is shared");
 });
 
 test("dedupeText: a model loop of repeated sentences/lines collapses to one copy before the cap check", async () => {
   assert.equal(P.dedupeText("A one. Tasks: x. Tasks: x. B two.\n- a b\n- A B.\n- c\n- c\n\nZ."), "A one. Tasks: x. B two.\n- a b\n- c\n\nZ.");
   const loop = "Plot 7. " + "Tasks: buy hose. Watering: Tuesday. ".repeat(60);
   const s = scriptedChat([{ body: loop }]);
-  const r = await P.createModelOps(s.chat).merge("Garden", "old", "new");
+  const r = await P.createModelOps(s.chat).merge("Garden", "Plot 7.", "new");
   assert.equal(r.body, "Plot 7. Tasks: buy hose. Watering: Tuesday."); assert.equal(r.reasked, false); assert.equal(s.seen.length, 1);
 });
 
-const para = (n, word = "Fact") => Array.from({ length: n }, (_, i) => `- ${word} ${i}: the cedar bed needs more soil before planting.`).join("\n"); // ~57 chars/line
+const letterId = i => String.fromCharCode(97 + Math.floor(i / 26)) + String.fromCharCode(97 + (i % 26)); // no digits: the numbers guard stays quiet
+const para = (n, word = "Fact") => Array.from({ length: n }, (_, i) => `- ${word} ${letterId(i)}: the cedar bed needs more soil before planting.`).join("\n"); // ~57 chars/line
 
 test("merge cap: <= 1,500 accepted as is; over -> re-ask once with stricter wording; still over -> cut at a boundary", async () => {
   let s = scriptedChat([{ body: para(20) }]);
@@ -419,6 +438,58 @@ test("merge cap: <= 1,500 accepted as is; over -> re-ask once with stricter word
   assert.equal(r.reasked, true); assert.equal(r.truncated, true); assert.ok(r.body.length <= 1500);
   assert.ok(r.body.endsWith("planting."), "cut at a bullet boundary, not mid-sentence");
   assert.equal(s.seen.length, 2, "re-asks only once");
+});
+
+test("numbers guard: numbers and am/pm times are parsed from digits, words, ordinals, commas and parts of the day", () => {
+  const n = P.numbersIn("forty dollars, ten by ten, May first, twenty-five chairs, 45,000 miles, 2x4s, 7:30, noon, a dozen eggs");
+  for (const x of ["40", "10", "1", "25", "45000", "2", "4", "7", "30", "12"]) assert.ok(n.has(x), x);
+  const t = P.timesIn("at 7 in the evening, 9am, 10:15 p.m., eleven pm, six o'clock in the morning, noon");
+  assert.deepEqual([...t].sort(), ["10:15pm", "11pm", "12pm", "6am", "7pm", "9am"].sort());
+});
+
+test("numbers guard: 'leave by 11' -> '11pm' loses the invented pm; supported times stay; invented numbers are reported", () => {
+  const src = "Sam: we should leave by 11 on Friday. Meet at 7 in the evening. The fee is forty dollars.";
+  let c = P.checkNumbers("- Leave by 11pm on Friday.\n- Meet at 7pm.\n- Fee: $40.", src);
+  assert.equal(c.body, "- Leave by 11 on Friday.\n- Meet at 7pm.\n- Fee: $40."); assert.equal(c.meridiemFixed, 1); assert.deepEqual(c.unsupported, []);
+  c = P.checkNumbers("Leave at 11 a.m. Then lunch.", src); assert.equal(c.body, "Leave at 11. Then lunch.", "sentence end kept");
+  c = P.checkNumbers("- Leave by 11 on Friday, March 3, 2027.\n- Fee: $45.", src);
+  assert.deepEqual(c.unsupported, ["3", "2027", "45"]);
+  c = P.checkNumbers("- Dinner at 8pm.", "dinner at eight"); assert.deepEqual(c.unsupported, [], "8 was said: only the pm is dropped"); assert.equal(c.body, "- Dinner at 8.");
+});
+
+test("numbers guard: dropUnsupported removes only the sentences/bullets holding the token, never everything", () => {
+  assert.deepEqual(P.dropUnsupported("- Oil change at 45,000 miles.\n- Next one at 50,000. Rotate tires.\n- Keep receipts.", ["50,000"]),
+    { body: "- Oil change at 45,000 miles.\n- Rotate tires.\n- Keep receipts.", dropped: 1 });
+  assert.deepEqual(P.dropUnsupported("- Next at 50,000.", ["50,000"]), { body: "- Next at 50,000.", dropped: 0, keptAll: true });
+  assert.deepEqual(P.dropUnsupported("- Plot 17 is big.\n- Gate 7 is locked.", ["7"]), { body: "- Plot 17 is big.", dropped: 1 }, "'7' does not match inside '17'");
+});
+
+test("numbers guard in the model ops: am/pm fix without a model call; invented numbers -> one re-ask, then drop; counts-only log", async () => {
+  const tr = "User: we leave by 11 on Friday. Bring forty dollars for the plot fee.\nGrok: Noted.";
+  const ok = { pin: "Trip", title: "Leaving Friday", body: "- Leave by 11pm on Friday.\n- Bring $40 for the plot fee." };
+  let s = scriptedChat([ok]);
+  let r = await P.createModelOps(s.chat).summarizeNew(tr);
+  assert.equal(r.body, "- Leave by 11 on Friday.\n- Bring $40 for the plot fee."); assert.equal(s.seen.length, 1); assert.equal(r.numbers.meridiemFixed, 1);
+  assert.match(s.seen[0].system, /never add am\/pm/);
+  // an invented year: the model is asked once to remove it
+  const lines = [];
+  s = scriptedChat([{ ...ok, body: "- Leave by 11 on Friday, 2027.\n- Bring $40 for the plot fee." }, { body: "- Leave by 11 on Friday.\n- Bring $40 for the plot fee." }]);
+  r = await P.createModelOps(s.chat, { log: (l, m, f) => lines.push(JSON.stringify({ m, ...f })) }).summarizeNew(tr);
+  assert.equal(r.body, "- Leave by 11 on Friday.\n- Bring $40 for the plot fee."); assert.equal(s.seen.length, 2);
+  assert.match(s.seen[1].user, /NOT in the conversation: 2027/); assert.equal(r.numbers.numbersReasked, true);
+  assert.ok(lines.some(l => l.includes("numbers guard")) && !lines.join("").includes("Friday"), "log: counts only");
+  // the re-ask still invents: the sentence is dropped
+  s = scriptedChat([{ ...ok, body: "- Leave by 11 on Friday.\n- Gate code 4471.\n- Bring $40." }, { body: "- Leave by 11 on Friday.\n- Gate code 4471.\n- Bring $40." }]);
+  r = await P.createModelOps(s.chat).summarizeNew(tr);
+  assert.equal(r.body, "- Leave by 11 on Friday.\n- Bring $40."); assert.equal(r.numbers.dropped, 1);
+  // merge: numbers from the CURRENT summary count as supported
+  s = scriptedChat([{ body: "- Plot 7, fee $40 paid.\n- Water Tuesday at 6pm." }]);
+  r = await P.createModelOps(s.chat).merge("Garden", "- Plot 7.\n- Water at 6 in the evening.", "User: paid the forty dollar fee");
+  assert.equal(r.body, "- Plot 7, fee $40 paid.\n- Water Tuesday at 6pm."); assert.equal(s.seen.length, 1);
+  // compact: source is the current summary only
+  s = scriptedChat([{ body: "- Plot 7 is ours (since 2019)." }, { body: "- Plot 7 is ours." }]);
+  r = await P.createModelOps(s.chat).compact("Garden", "- Plot 7 is ours.", 1000);
+  assert.equal(r.body, "- Plot 7 is ours.");
 });
 
 test("truncateAtBoundary: sentence / line boundaries, never over the cap", () => {
@@ -564,6 +635,77 @@ test("health: missing cookie -> auth; unreachable host -> network; 200 HTML logi
   assert.equal(P.backoffSeconds(1, 90, 600, 120), 120);
   assert.equal(P.backoffSeconds(10, 90, 600), 600, "max ~10 min");
 });
+// a counting stand-in for grok.com: `answer(url)` returns the Response for each request
+function countingGrok(answer) {
+  const calls = [];
+  const fetchFn = async (url, init) => { calls.push({ url: String(url), redirect: init?.redirect }); return answer(String(url)); };
+  return { calls, reader: P.createRestReader({ cookie: "sso=SECRETCOOKIE123", fetchFn }) };
+}
+const AUTH_FAILURES = {
+  "401": () => new Response('{"error":"unauthenticated"}', { status: 401, headers: { "content-type": "application/json" } }),
+  "403 json": () => new Response('{"error":"forbidden"}', { status: 403, headers: { "content-type": "application/json" } }),
+  "403 challenge page": () => new Response("<!doctype html><title>Just a moment...</title><script src=/cdn-cgi/challenge-platform/x></script>", { status: 403, headers: { "content-type": "text/html" } }),
+  "302 to sign-in": () => new Response(null, { status: 302, headers: { location: "https://accounts.x.ai/sign-in" } }),
+  "307 redirect": () => new Response(null, { status: 307, headers: { location: "/login" } }),
+  "200 challenge page": () => new Response("<html><body>cf-chl captcha</body></html>", { status: 200, headers: { "content-type": "text/html" } }),
+  "200 login page (no content-type)": () => new Response("<!DOCTYPE html><html><body>Sign in to Grok</body></html>", { status: 200 }),
+};
+
+test("auth path: 401 / 403 / challenge pages / redirects -> kind auth, one request per cycle, redirects never followed, no secrets in errors", async () => {
+  for (const [name, answer] of Object.entries(AUTH_FAILURES)) {
+    const g = countingGrok(answer);
+    const dir = tmp();
+    const cfg = cfgFor(dir, { since: HOUR_AGO() });
+    const lines = [];
+    const poller = P.createPoller({ cfg, reader: g.reader, summarizer: fakeSummarizer(), inbox: memInbox(), board: fakeBoard() });
+    const r = await P.pollOnce(poller, cfg, (lvl, msg, f) => lines.push(JSON.stringify({ msg, ...f })));
+    assert.equal(r.ok, false, name); assert.equal(r.kind, "auth", name);
+    assert.equal(g.calls.length, 1, `${name}: stops after the first failing request`);
+    assert.equal(g.calls[0].redirect, "manual", `${name}: redirects are not followed`);
+    const h = JSON.parse(fs.readFileSync(path.join(dir, "health.json"), "utf8"));
+    assert.equal(h.kind, "auth", name); assert.equal(P.healthVerdict(h).healthy, false);
+    assert.ok(!JSON.stringify(h).includes("SECRETCOOKIE123") && !lines.join("").includes("SECRETCOOKIE123"), `${name}: cookie never in health/log`);
+    if (/challenge/.test(name)) assert.match(h.lastError.message, /challenge/);
+  }
+});
+
+test("auth path: a failure while loading one conversation stops the whole cycle (no requests for the others)", async () => {
+  const now = Date.now(), iso = m => new Date(now - m * 60_000).toISOString();
+  const list = { conversations: ["a", "b", "c"].map(id => ({ conversationId: id, title: id, createTime: iso(40), modifyTime: iso(20), mediaTypes: ["audio"] })) };
+  const g = countingGrok(url => /conversations\?/.test(url)
+    ? new Response(JSON.stringify(list), { status: 200, headers: { "content-type": "application/json" } })
+    : AUTH_FAILURES["401"]());
+  const dir = tmp();
+  const cfg = cfgFor(dir, { since: new Date(now - 3600_000).toISOString() });
+  const poller = P.createPoller({ cfg, reader: g.reader, summarizer: fakeSummarizer(), inbox: memInbox(), board: fakeBoard() });
+  const r = await P.pollOnce(poller, cfg);
+  assert.equal(r.kind, "auth");
+  assert.equal(g.calls.length, 2, "list + the first response-node only");
+});
+
+test("auth path: back-off doubles to 30 min for auth (10 min for other errors); at most ~6 requests in the first hour, 2/hour after", async () => {
+  const cfg = { pollSeconds: 90, maxBackoffSeconds: 600, authMaxBackoffSeconds: 1800 };
+  const seq = kind => Array.from({ length: 8 }, (_, i) => P.backoffSeconds(i + 1, cfg.pollSeconds, P.maxBackoffFor(kind, cfg)));
+  assert.deepEqual(seq("auth"), [90, 180, 360, 720, 1440, 1800, 1800, 1800]);
+  assert.deepEqual(seq("network"), [90, 180, 360, 600, 600, 600, 600, 600]);
+  // replay the loop: one request per cycle, sleep `wait` between cycles
+  const g = countingGrok(AUTH_FAILURES["401"]);
+  const dir = tmp();
+  const c2 = cfgFor(dir, { since: HOUR_AGO() });
+  assert.equal(c2.authMaxBackoffSeconds, 1800, "default");
+  const poller = P.createPoller({ cfg: c2, reader: g.reader, summarizer: fakeSummarizer(), inbox: memInbox(), board: fakeBoard() });
+  let t = 0, inFirstHour = 0, inThirdHour = 0;
+  while (t < 3 * 3600) {
+    const r = await P.pollOnce(poller, c2);
+    if (t < 3600) inFirstHour++; else if (t >= 7200) inThirdHour++;
+    t += r.wait;
+  }
+  assert.ok(inFirstHour <= 6, `first hour: ${inFirstHour} requests`);
+  assert.equal(inThirdHour, 2, "steady state: one request per 30 min");
+  // a 429 with Retry-After is honoured (up to 1 h)
+  assert.equal(P.backoffSeconds(1, 90, 600, 900), 900);
+});
+
 test("health: summarizer failure is reported but nothing is pushed; recovery resets the counter", async () => {
   const t = await setup({ summarizer: fakeSummarizer({ fail: true }), since: new Date(Date.now() - 3600_000).toISOString() });
   try {
@@ -643,10 +785,13 @@ test("summary cleanup: at most 6 bullets, schema check", () => {
 });
 
 /* ---------- runner ---------- */
+// optional filter: node poller/test/run.mjs auth   (only tests whose name contains "auth")
+const only = process.argv[2] || "";
+const selected = tests.filter(t => !only || t.name.includes(only));
 let pass = 0, fail = 0;
-for (const t of tests) {
+for (const t of selected) {
   try { await t.fn(); pass++; console.log(`ok   ${t.name}`); }
   catch (e) { fail++; console.log(`FAIL ${t.name}\n     ${e.stack.split("\n").slice(0, 4).join("\n     ")}`); }
 }
-console.log(`\n${pass} passed, ${fail} failed (${tests.length} tests)`);
+console.log(`\n${pass} passed, ${fail} failed (${selected.length} tests)`);
 process.exit(fail ? 1 : 0);
