@@ -17,6 +17,7 @@
 //   node poller/poller.mjs --send-command cmd.json [--name file.json]   # push one command, wait for result
 //   node poller/poller.mjs --reset <convKey>  # retry a needs_attention conversation (new file name)
 //   node poller/poller.mjs --compact [--dry-run] [--threshold 1500] [--target 1000] [--json]   # weekly compaction
+//   node poller/poller.mjs --filter-config  # print the effective throwaway-chat filter settings
 //
 // Privacy: logs contain only ids (hashed), counts, timestamps and statuses. Never message text,
 // cookies or tokens.
@@ -28,6 +29,7 @@ import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
+import { loadFilterConfig, prefilter, stripThrowaway, interpretClassification, CLASSIFY_PROMPT, CLASSIFY_SCHEMA } from "./filter.mjs";
 
 /* ------------------------------------------------------------------ */
 /* config                                                              */
@@ -70,6 +72,8 @@ export function loadConfig(env = process.env, argv = []) {
     compactTarget: num(env.COMPACT_TARGET, 1000),
     dryRun: !!args["dry-run"],
     since: args.since || env.POLLER_SINCE || "",
+    // throwaway-chat filter (filter.mjs): skip categories, model classifier on/off; FILTER_CONFIG / <home>/filter.json + env
+    filter: loadFilterConfig(env, home),
   };
   if (cfg.pollSeconds < 60 && !env.POLL_SECONDS_ALLOW_FAST) cfg.pollSeconds = 60; // be gentle with grok.com
   if (cfg.pollSeconds > 120 && !env.POLL_SECONDS_ALLOW_SLOW) cfg.pollSeconds = 120;
@@ -626,6 +630,12 @@ export function createModelOps(chat, { cap = TOPIC_CAP, log = () => {} } = {}) {
   }
   return {
     chat,
+    // throwaway-chat classifier (filter.mjs, only when the keyword prefilter says "ask") -> raw {category, keep}
+    async classify(transcript) {
+      const r = await chat({ system: CLASSIFY_PROMPT, user: `Transcript:\n${clip(transcript, 4000)}\n\nWhich category is this chat, and should it be kept as a note?`, schema: CLASSIFY_SCHEMA, maxTokens: 30 });
+      if (!r || typeof r.category !== "string" || typeof r.keep !== "boolean") throw new PollerError("summarizer", "classify: model output fails schema");
+      return r;
+    },
     // -> {topic: "<exact existing name>" | "NEW"}
     async match(topics, transcript) {
       const names = [...new Set(topics.map(t => t.pinTitle))];
@@ -1001,7 +1011,7 @@ export function createPoller({ cfg, reader, summarizer, inbox, board, log = () =
   }
 
   // Decide the topic and write the command, inside one llama-server session.
-  async function writeTopic(st, todo, newMsgs) {
+  async function writeTopic(st, todo, newMsgs, pf = { decision: "keep" }) {
     const topics = (await board.listTopics()).filter(t => !isExcluded(cfg, t));
     let target = st.board ? topics.find(t => sameTopic(t, st.board)) || null : null;
     if (st.board && !target) { log("info", "topic no longer on the board; matching again", { conv: st.convKey }); st.board = null; }
@@ -1009,8 +1019,13 @@ export function createPoller({ cfg, reader, summarizer, inbox, board, log = () =
     const candidates = topics.slice(0, cfg.maxTopics);
     const listChars = candidates.reduce((n, t) => n + t.pinTitle.length + 130, 0);
     const curChars = Math.max(0, ...candidates.map(t => (t.page1?.body || "").length));
-    const fit = fitTranscript(formatTranscript(target ? newMsgs : todo), MAX_CTX, Math.max(listChars, curChars) + 400);
+    // after a filtered (throwaway) part, only the new messages make the note
+    const fit = fitTranscript(formatTranscript(target || st.filtered ? newMsgs : todo), MAX_CTX, Math.max(listChars, curChars) + 400);
     const { result, stats } = await summarizer.withModel(fit.ctx, async ops => {
+      if (pf.decision === "ask") { // little real content: the model's classifier decides (a skip only for an enabled category)
+        const c = interpretClassification(await ops.classify(fit.text), cfg.filter);
+        if (!c.keep) return { filtered: c };
+      }
       let how = target ? "resume" : "new";
       if (!target && candidates.length) {
         const m = await ops.match(candidates, fit.text);
@@ -1034,7 +1049,19 @@ export function createPoller({ cfg, reader, summarizer, inbox, board, log = () =
       return { how, cmd: editTopicCommand(target, mg.body), info: mg };
     });
     if (result.busy) return { kind: "busy" };
+    if (result.filtered) return { kind: "filtered", ...result.filtered, stats };
     return { kind: "write", ...result, stats, truncatedTranscript: fit.truncated };
+  }
+
+  // a throwaway chat (or throwaway continuation): handled, never retried; only later messages are looked at again.
+  // Logged by hashed id + category only.
+  function markFiltered(st, last, category, by, turns) {
+    st.lastPostedMsgTime = last.createTime;
+    st.status = st.board ? "posted" : "skipped_filtered";
+    st.filtered = { category, by, at: new Date(now()).toISOString() };
+    log("info", "skipped by filter", { conv: st.convKey, category, by, turns });
+    save();
+    return "filtered";
   }
 
   async function handle(conv, nowMs) {
@@ -1075,6 +1102,9 @@ export function createPoller({ cfg, reader, summarizer, inbox, board, log = () =
       st.lastPostedMsgTime = last.createTime; st.status = st.board ? "posted" : "skipped_trivial";
       log("info", "nothing substantial to post", { conv: st.convKey, messages: newMsgs.length }); return "trivial";
     }
+    // throwaway filter, stage 1 (keywords, no model): directions / weather / lookups / timers / music / greetings
+    const pf = prefilter(newMsgs, cfg.filter);
+    if (pf.decision === "skip") return markFiltered(st, last, pf.category, "keywords", pf.turns);
 
     // one llama-server user at a time: if --compact holds the model, try again next poll
     const release = tryLock(modelLock);
@@ -1083,9 +1113,12 @@ export function createPoller({ cfg, reader, summarizer, inbox, board, log = () =
     try {
       st.status = "quiet";
       log("info", "quiet; writing topic", { conv: st.convKey, messages: todo.length, newMessages: newMsgs.length, quietMin: +(q.quietMs / 60000).toFixed(1), method: q.method, resume: !!st.board });
-      try { w = await writeTopic(st, todo, newMsgs); }
+      // kept: the throwaway turns of a mixed chat (and Grok's answers to them) stay out of the note
+      const clean = pf.turns.throwaway ? x => stripThrowaway(x, cfg.filter) : x => x;
+      try { w = await writeTopic(st, clean(todo), clean(newMsgs), pf); }
       catch (e) { throw e instanceof PollerError ? e : new PollerError("summarizer", e.message); }
       if (w.kind === "busy") { log("info", "topic has a command waiting for its result; deferring", { conv: st.convKey }); return "deferred"; }
+      if (w.kind === "filtered") return markFiltered(st, last, w.category, "model", pf.turns);
       const cmd = w.cmd;
       const name = commandFileName(st.convKey, last.createTime, cmd.op, st.retry);
       const pushed = await inbox.pushIfAbsent(name, cmd);
@@ -1298,6 +1331,8 @@ async function main(argv) {
     process.exit(v.healthy ? 0 : 1);
   }
 
+  if (a["filter-config"]) { console.log(JSON.stringify(cfg.filter, null, 2)); return; }
+
   if (a["summarize-file"]) {
     const text = fs.readFileSync(a["summarize-file"], "utf8");
     const { summary, stats } = await createLlamaSummarizer(cfg, () => {}).summarize(text);
@@ -1343,7 +1378,7 @@ async function main(argv) {
   const reader = cfg.reader === "browser" ? createBrowserReader()
     : createRestReader({ baseUrl: cfg.grokBase, cookie: process.env.GROK_COOKIE, pageSize: cfg.pageSize });
   const poller = createPoller({ cfg, reader, summarizer: createLlamaSummarizer(cfg, log), inbox: makeInbox(), board: createBoardReader(), log });
-  log("info", "start", { reader: reader.kind, quietMinutes: cfg.quietMinutes, pollSeconds: cfg.pollSeconds, dryRun: cfg.dryRun, since: poller.state.since, repo: cfg.repo, branch: cfg.branch });
+  log("info", "start", { filter: { skip: cfg.filter.skip, model: cfg.filter.model, source: cfg.filter.source }, reader: reader.kind, quietMinutes: cfg.quietMinutes, pollSeconds: cfg.pollSeconds, dryRun: cfg.dryRun, since: poller.state.since, repo: cfg.repo, branch: cfg.branch });
 
   for (;;) {
     const { wait } = await pollOnce(poller, cfg, log);

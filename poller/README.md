@@ -11,6 +11,7 @@ gone quiet, summarizes it with a **local** model, and pushes one command file to
 `--compact` run rewrites summaries that grew past the cap to about 1,000 characters.
 
 - `poller.mjs`: the whole thing. Node 18+, no dependencies (built-in `fetch`).
+- `filter.mjs`: the throwaway-chat filter (directions, weather, lookups, timers, music, greetings), see below.
 - `start.sh`: start / stop / status in the background (nohup).
 - `.env.example`: the settings, with placeholder values only.
 - `test/`: unit tests, a fake grok.com server and **synthetic** fixtures.
@@ -35,11 +36,58 @@ Every `POLL_SECONDS` (default 90, clamped to 60–120):
    (clock skew), it falls back to "how long the newest message has been the newest by our clock".
 5. Skip it if you said an opt-out phrase ("don't post this", "do not post", "off the record"); only summarize what
    came after Ara's "Posted." if you said "post it" during the drive.
-6. **Match or NEW** (below): read the board's topics, ask the local model whether the chat belongs to one of them.
-7. **Matched** → merge the current summary with the new chat → `edit` page 1 of that pin. **NEW** → summarize →
+6. **Throwaway filter** ([below](#throwaway-chat-filter)): skip directions, weather, quick lookups, timers, music and
+   greetings-only / very short chats before anything is summarized.
+7. **Match or NEW** (below): read the board's topics, ask the local model whether the chat belongs to one of them.
+8. **Matched** → merge the current summary with the new chat → `edit` page 1 of that pin. **NEW** → summarize →
    `add` a new pin with page 1 "Summary".
-8. Push the command (exactly the fields `post.mjs --command-file` accepts) *push-if-absent* with the GitHub contents
+9. Push the command (exactly the fields `post.mjs --command-file` accepts) *push-if-absent* with the GitHub contents
    API; then read `inbox/results/<name>` on later polls and record the status.
+
+### Throwaway-chat filter
+
+Not every drive chat deserves a note: "navigate to the hardware store", "what's the weather tomorrow", "play some
+jazz". `filter.mjs` decides **before** anything is summarized, cheapest first, and leans towards **keep** (a wrong
+skip loses a note; a wrong keep only costs a small one):
+
+1. **Keywords, no model** (on *your* turns only). Each user turn is *filler* (hi / thanks / ok / bye), *throwaway*
+   (matches a category's patterns **and** is ≤ 16 words), or *other* (anything else, including a long turn that
+   only mentions a keyword: "navigate to the lumber yard, I need cedar boards for the garden bed…"). Reminders and
+   to-dos are never throwaway; a short question with "I / my / we / plan / need / buy…" is not a lookup.
+   - all user turns filler → skip **`greeting`**;
+   - every non-filler turn throwaway → skip with the most frequent category: **`directions`** (navigate, route,
+     traffic, ETA, nearest…, exit, turn left), **`weather`** (weather, forecast, rain today, umbrella),
+     **`lookup`** (short who/what/when/how-many questions, scores, conversions, definitions), **`timer`**
+     (timer, alarm, stopwatch), **`media`** (play music/podcast/radio, pause, skip song, volume);
+   - fewer than `FILTER_MIN_WORDS` (6) user words → skip **`short`**;
+   - otherwise, with at least `FILTER_ASK_BELOW_WORDS` (25) words of real content → **keep** (a mixed chat with a
+     real plan is kept without a model call).
+2. **Gray zone → one small model call** (only when there are fewer than 25 words of real content): the local model
+   answers a JSON schema `{"category": "topic"|"directions"|"weather"|"lookup"|"timer"|"media"|"greeting",
+   "keep": true|false}`; the prompt says any plan, to-do, reminder or idea makes the whole chat `topic`. The chat is
+   skipped only when the category is an **enabled** throwaway category (never `topic`). It runs inside the same
+   `llama-server` session as matching (~1 s), so a kept chat costs no extra model start.
+3. **Kept mixed chats:** throwaway turns and Grok's answers to them are left out of the transcript the summarizer
+   sees, so "take me to the lumber yard" + a shelf plan becomes a *Garage shelves* note, not *Lumber yard route*.
+
+A skipped chat is **handled**: state gets `status: "skipped_filtered"` (or stays `posted` for a resumed topic),
+`filtered: {category, by: "keywords"|"model", at}` and `lastPostedMsgTime`, so it is never loaded or classified
+again; if the conversation continues later, only the **new** messages are filtered (and summarized). The log line
+is `skipped by filter` with the hashed `conv` key, `category`, `by` and turn counts, never any text.
+
+**Settings** (env wins over the file; `node poller/poller.mjs --filter-config` prints the effective settings):
+
+| Setting | Default | |
+|---|---|---|
+| `SKIP_CATEGORIES` | `directions,weather,lookup,timer,media,greeting,short` | comma list; `none` turns the filter off; unknown names fail at start |
+| `FILTER_MODEL` | `1` | `0` = keywords only (gray-zone chats are kept) |
+| `FILTER_MIN_WORDS` | `6` | fewer user words → `short` |
+| `FILTER_ASK_BELOW_WORDS` | `25` | less real content than this → ask the model |
+| `FILTER_CONFIG` | `~/.post-it-poller/filter.json` (if it exists) | JSON: `{"skip": [...], "model": true, "minWords": 6, "askBelowWords": 25, "keywords": {"media": ["\\baudiobook\\b"]}}` (`keywords` adds regexes to a category) |
+
+Measured with `node poller/test/filter-eval.mjs` (20 synthetic chats, 3 runs, real model): **59/60 correct, 0 wrong
+skips**, 1 missed skip (a lookup kept once); 7 of 20 decided by keywords alone, 13 by one ~1 s classifier call
+([docs §2.10](../docs/transcript-automation.md#210-throwaway-chat-filter-oct-18-2026)).
 
 ### Topic papers: match, merge, cap
 
@@ -149,7 +197,8 @@ process uses the model at a time (`model.lock`): if `--compact` holds it, the lo
 | File | What |
 |---|---|
 | `env` | secrets + settings, **chmod 600** (the poller refuses a group/other-readable file); never committed |
-| `state.json` | per conversation: `convKey`, `status`, `lastSeenTs`, `lastLoadedModify`, `lastPostedMsgTime`, `board` (`date`, `pinTitle`, `pageNumber`: the topic it writes to), `pending` command (+ its `topic` and `how`: new/match/same-name/resume), `lastResult`, `retry`; plus `firstRunAt`/`since` |
+| `filter.json` | optional throwaway-filter settings (see [above](#throwaway-chat-filter)) |
+| `state.json` | per conversation: `convKey`, `status` (… `skipped_filtered`), `filtered` (`category`, `by`, `at`), `lastSeenTs`, `lastLoadedModify`, `lastPostedMsgTime`, `board` (`date`, `pinTitle`, `pageNumber`: the topic it writes to), `pending` command (+ its `topic` and `how`: new/match/same-name/resume), `lastResult`, `retry`; plus `firstRunAt`/`since` |
 | `poller.log` | JSON lines: ids (hashed), counts, timestamps, statuses. **Never** message text, cookies or tokens |
 | `health.json` | `{ok, lastSuccessAt, lastError, consecutiveFailures, kind, updatedAt, pid}` |
 | `poller.lock` | pid of the running poller (one runner at a time) |
@@ -237,6 +286,7 @@ Real-model checks on synthetic chats (each starts the local model once):
 node poller/test/model-merge.mjs   # topic flow: NEW, match, merge, cap, compaction (~1.5 min)
 node poller/test/match-eval.mjs    # matching accuracy on test/fixtures/match-suite.json (~2.5 min); exit 1 on a wrong merge
 node poller/test/guard-eval.mjs    # numbers guardrail: invented am/pm and numbers, old vs new prompt
+node poller/test/filter-eval.mjs   # throwaway filter: 20 synthetic chats (~15 s); exit 1 if a chat to keep is skipped
 ```
 
 Mock end to end (fake grok.com + real local model, nothing pushed):

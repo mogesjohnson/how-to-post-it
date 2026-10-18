@@ -313,6 +313,30 @@ call ([post-it-board #5](https://github.com/mogesjohnson/post-it-board/pull/5)).
 **Repo:** `main` of this repo is protected by a ruleset like post-it-board's (changes via pull request, no force
 push, no deletion); see the README's "Contributing" section.
 
+### 2.10 Throwaway-chat filter (Oct 18, 2026)
+
+[Issue #11](https://github.com/mogesjohnson/how-to-post-it/issues/11): "if I ask for directions, don't add that."
+The poller now skips throwaway chats **before** summarizing (details and settings:
+[poller/README.md → Throwaway-chat filter](../poller/README.md#throwaway-chat-filter)).
+
+| Stage | Cost | Decides |
+|---|---|---|
+| 1. Keywords on the user's turns (`filter.mjs`) | none | skip when every non-filler user turn is short and matches **directions / weather / lookup / timer / media**, or all turns are greetings/thanks (**greeting**), or < 6 user words (**short**); keep when ≥ 25 words of real content (mixed chats too) |
+| 2. Local model, JSON schema `{category, keep}` | ~1 s, same `llama-server` session as matching | only the gray zone (< 25 words of real content); skip only for an enabled throwaway category, never `topic` |
+| 3. Kept mixed chat | none | throwaway turns + Grok's answers are dropped from the transcript the summarizer sees |
+
+A skipped chat is marked handled in `state.json` (`status: "skipped_filtered"`, `filtered: {category, by, at}`,
+`lastPostedMsgTime`) and logged as `skipped by filter` with the hashed id and category only. It is not loaded or
+classified again; a continuation is judged on its new messages only.
+
+Results (synthetic chats only):
+
+| Check | Result |
+|---|---|
+| Unit tests (`node poller/test/run.mjs`) | 53/53 (5 new: keyword decisions per category, config/env/file, loop integration with directions/weather/greeting skipped + real and mixed chats posted + no retry + id/category-only log, model stage, classify schema) |
+| `node poller/test/filter-eval.mjs`, real Qwen3.5-2B, 20 chats × 3 runs | **59/60 correct, 0 wrong skips**, 1 missed skip (a lookup kept once); 7/20 by keywords, 13/20 by the classifier (~0.8–3.5 s per call on the loaded box). The first prompt version (biased "when unsure, keep") kept 4/9 throwaway chats; worked examples (different from the eval chats) + "the category decides" fixed that |
+| Mock end to end (fake grok.com with `test/fixtures/filter-chats.json`, real model, `--dry-run`, empty fake board) | directions, weather and greeting chats skipped by keywords; the birthday chat → *Nora's Birthday Party*; the mixed drive + shelves chat → *Plan Garage Shelves* (before throwaway turns were stripped it came out as *Lumber yard route*) |
+
 ## 3. The silence-detection loop
 
 ### 3.1 State per conversation
@@ -329,7 +353,8 @@ Keep one small record per conversation, in a local file or tiny database on the 
 | `lastPostedTs` | timestamp of the newest message that is already included in a pushed summary |
 | `pending` | `{file, lastTs, op, pushedAt}` for a pushed command whose result hasn't been read yet |
 | `board` | where the note landed: `{date, pinTitle, pageTitle, pageNumber}` taken from the result file |
-| `status` | `active`, `quiet`, `posting`, `posted`, `needs_attention`, or `opted_out` |
+| `status` | `active`, `quiet`, `posting`, `posted`, `needs_attention`, `opted_out`, `skipped_trivial` or `skipped_filtered` (throwaway chat, §2.10) |
+| `filtered` | `{category, by, at}` when the throwaway filter skipped (part of) the conversation |
 | `retry` | starts at 0; a manual reset adds 1, so the retried command gets a new file name (`…-<op>-r1.json`) |
 
 If the state file is lost, rebuild `lastPostedTs` and `board` from `inbox/results/auto-<convKey>-*.json` on the
@@ -346,6 +371,8 @@ stateDiagram-v2
   Active --> Quiet: newest createTime and modifyTime older than QUIET_MINUTES
   Quiet --> Active: newer message appears
   Quiet --> OptedOut: you said "don't post this"
+  Quiet --> Filtered: directions, weather, lookup, timer, music, greetings-only (section 2.10)
+  Filtered --> Active: conversation continues later (only the new messages are judged)
   Quiet --> Posting: summarize, push inbox file
   Posting --> Posted: result ok or skipped_duplicate
   Posting --> NeedsAttention: error_invalid or skipped_ambiguous
@@ -355,6 +382,7 @@ stateDiagram-v2
   NeedsAttention --> Active: newer message appears, or you reset it after a fix (bumps retry)
   Posted --> [*]
   OptedOut --> [*]
+  Filtered --> [*]
 ```
 
 In words:
@@ -446,6 +474,10 @@ loop forever:
 
     if any(user turn contains an optOutPhrase):
       st.status = "opted_out"; st.lastPostedTs = last.ts; state.save(st); continue
+    pf = prefilter(user turns after lastPostedTs)          # §2.10: keywords first, no model
+    if pf == skip:                                          # directions/weather/lookup/timer/media/greeting/short
+      st.status = "skipped_filtered"; st.filtered = {category, by}; st.lastPostedTs = last.ts; state.save(st); continue
+    # pf == ask (little real content): classify with the local model first, skip on a throwaway category
     todo = msgs[ara_post_point(msgs):]                    # only what came after Ara's "Posted." (section 6), else all
     if not substantial(todo):                             # Ara already posted everything worth keeping
       st.lastPostedTs = last.ts; state.save(st); continue
