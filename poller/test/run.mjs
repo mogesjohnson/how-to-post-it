@@ -5,7 +5,9 @@ import os from "node:os";
 import path from "node:path";
 import { spawnSync } from "node:child_process";
 import { fileURLToPath } from "node:url";
-import * as P from "../poller.mjs";
+import * as P0 from "../poller.mjs";
+import * as F from "../filter.mjs";
+const P = { ...P0, ...F };
 import { startFakeGrok } from "./fake-grok.mjs";
 
 const here = path.dirname(fileURLToPath(import.meta.url));
@@ -21,6 +23,7 @@ function cfgFor(dir, extra = {}) {
 function fakeSummarizer(over = {}) {
   const calls = [];
   const ops = {
+    async classify(transcript) { calls.push({ op: "classify", transcript }); return typeof over.classify === "function" ? over.classify(transcript) : (over.classify || { category: "topic", keep: true }); },
     async match(topics, transcript) { calls.push({ op: "match", names: topics.map(t => t.pinTitle), transcript }); return { topic: typeof over.match === "function" ? over.match(topics, transcript) : (over.match || "NEW") }; },
     async summarizeNew(transcript) { calls.push({ op: "new", transcript }); return { pin: over.pin || "Garden bed", title: "Raised bed plan", body: "- 4 x 8 ft cedar bed\n- Tomatoes and basil\n- Buy boards and soil Saturday", reasked: false, truncated: false }; },
     async merge(name, current, transcript) { calls.push({ op: "merge", name, current, transcript }); return { body: `${current}\n- merged update`, reasked: false, truncated: false }; },
@@ -80,14 +83,14 @@ function memInbox(board) {
     processAll() { for (const n of [...files.keys()]) this.process(n); },
   };
 }
-async function setup({ since, summarizer = fakeSummarizer(), mode = "ok", topics = [], cfgExtra = {} } = {}) {
-  const fake = await startFakeGrok({ mode });
+async function setup({ since, summarizer = fakeSummarizer(), mode = "ok", topics = [], cfgExtra = {}, fixture, log } = {}) {
+  const fake = await startFakeGrok({ mode, ...(fixture ? { fixture: path.join(here, "fixtures", fixture) } : {}) });
   const dir = tmp();
   const cfg = cfgFor(dir, { ...(since ? { since } : {}), ...cfgExtra });
   const reader = P.createRestReader({ baseUrl: fake.url, cookie: "sso=synthetic; sso-rw=synthetic" });
   const board = fakeBoard(topics);
   const inbox = memInbox(board);
-  const poller = P.createPoller({ cfg, reader, summarizer, inbox, board });
+  const poller = P.createPoller({ cfg, reader, summarizer, inbox, board, ...(log ? { log } : {}) });
   return { fake, dir, cfg, reader, inbox, poller, summarizer, board };
 }
 const HOUR_AGO = () => new Date(Date.now() - 3600_000).toISOString();
@@ -782,6 +785,138 @@ test("summary cleanup: at most 6 bullets, schema check", () => {
   assert.equal(P.validateSummary({ pin: "a", title: "b", body: "c" }), null);
   assert.match(P.validateSummary({ pin: "a", title: "b" }), /missing body/);
   assert.match(P.validateSummary({ pin: "a", title: "b", body: "c", x: 1 }), /extra/);
+});
+
+/* ---------- throwaway-chat filter (filter.mjs) ---------- */
+const DIRECTIONS = "synthetic-voice-directions-0101", TOPIC = "synthetic-voice-topic-0102", MIXED = "synthetic-voice-mixed-0103",
+  WEATHER = "synthetic-voice-weather-0104", GREETING = "synthetic-voice-greeting-0105";
+const H = text => ({ sender: "human", text }), A = text => ({ sender: "assistant", text });
+
+test("filter prefilter: throwaway user turns are skipped by keywords (no model); real and mixed chats are kept", () => {
+  const D = F.FILTER_DEFAULTS;
+  const pf = msgs => P.prefilter(msgs, D);
+  // directions, weather, lookup, timer, media, greetings-only, very short
+  assert.deepEqual([pf([H("Navigate to the Maple Street hardware store."), A("Starting directions."), H("How's the traffic on the highway?"), H("Okay thanks.")])].map(r => [r.decision, r.category]), [["skip", "directions"]]);
+  assert.equal(pf([H("What's the weather tomorrow?"), H("Do I need an umbrella?")]).category, "weather");
+  assert.equal(pf([H("What is the capital of Portugal?"), A("Lisbon."), H("Thanks")]).category, "lookup");
+  assert.equal(pf([H("Set a timer for 10 minutes")]).category, "timer");
+  assert.equal(pf([H("Play some music"), H("Turn it up"), H("Skip this song")]).category, "media");
+  assert.deepEqual([pf([H("Hey Grok, good morning! How are you?"), A("Great!"), H("Nothing, thanks. Bye!")])].map(r => [r.decision, r.category]), [["skip", "greeting"]]);
+  assert.deepEqual([pf([H("Tomatoes later.")])].map(r => [r.decision, r.category]), [["skip", "short"]]);
+  // a real topic: kept without a model call
+  const topic = pf([H("Let's plan Nora's tenth birthday party. I'm thinking of doing it at the community pool on the 14th, with about twelve kids."), H("Order a chocolate cake from the bakery downtown, and remind me to send the invitations by Friday.")]);
+  assert.equal(topic.decision, "keep");
+  // mixed: directions + a real plan -> kept (enough real content: no model call either)
+  const mixed = pf([H("Take me to the lumber yard on Route 9."), H("While I drive, help me plan the garage shelves. I want three shelves on the left wall, sixteen inches deep, made from 2x4s and plywood."), H("Great, add brackets and a box of screws to the shopping list, and I'll borrow Sam's stud finder.")]);
+  assert.equal(mixed.decision, "keep"); assert.equal(mixed.turns.throwaway, 1);
+  // a long turn that only mentions a keyword in passing is real content
+  assert.equal(P.classifyTurn("Navigate to the lumber yard because I need cedar boards for the garden bed we are building this weekend", D).kind, "other");
+  // reminders / plans are never throwaway; short real content goes to the model ("ask")
+  assert.equal(P.classifyTurn("Remind me to call the bakery about the cake order", D).kind, "other");
+  assert.equal(P.classifyTurn("What should I buy for the garden?", D).kind, "other", "a question about the user's own plan is not a lookup");
+  assert.equal(P.classifyTurn("my resume needs work before Friday", D).kind, "other");
+  assert.equal(pf([H("Remind me to call the bakery about the cake order."), A("Noted.")]).decision, "ask");
+  // stripThrowaway: drops throwaway user turns + the answers to them; never everything
+  const kept = P.stripThrowaway([H("Navigate home."), A("Navigating, 20 minutes."), A("Turn left."), H("Remind me to email Priya about the budget."), A("Will do.")], D);
+  assert.deepEqual(kept.map(m => m.text), ["Remind me to email Priya about the budget.", "Will do."]);
+  const only = [H("Navigate home."), A("Navigating.")];
+  assert.equal(P.stripThrowaway(only, D), only);
+  // the decision carries counts and a category only
+  assert.deepEqual(Object.keys(topic).sort(), ["by", "category", "decision", "otherWords", "turns", "userWords"]);
+});
+
+test("filter config: env / file, 'none' turns it off, a disabled category is kept, FILTER_MODEL=0 keeps the gray zone, bad config fails at start", () => {
+  const dir = tmp();
+  assert.deepEqual(P.loadConfig({ POLLER_HOME: dir }, []).filter.skip, F.CATEGORIES);
+  assert.equal(P.loadConfig({ POLLER_HOME: dir }, []).filter.source, "defaults");
+  fs.writeFileSync(path.join(dir, "filter.json"), JSON.stringify({ skip: ["directions", "weather"], askBelowWords: 20, keywords: { media: ["\\baudiobook\\b"] } }));
+  let c = P.loadConfig({ POLLER_HOME: dir }, []).filter;
+  assert.deepEqual(c.skip, ["directions", "weather"]); assert.equal(c.askBelowWords, 20); assert.equal(c.source, "file");
+  assert.equal(P.prefilter([H("What is the capital of Portugal?")], c).decision, "ask", "lookup not skipped -> real content -> model decides");
+  c = P.loadConfig({ POLLER_HOME: dir, SKIP_CATEGORIES: "directions,media", FILTER_MODEL: "0" }, []).filter;
+  assert.deepEqual(c.skip, ["directions", "media"]); assert.equal(c.model, false); assert.equal(c.source, "file+env");
+  assert.equal(P.prefilter([H("Play my audiobook")], c).category, "media", "extra keywords from the file");
+  assert.equal(P.prefilter([H("What's the weather tomorrow?"), H("Do I need an umbrella?")], c).decision, "keep", "weather not in the list, model off -> keep");
+  assert.equal(P.prefilter([H("Navigate to Maple Street")], P.loadConfig({ POLLER_HOME: dir, SKIP_CATEGORIES: "none" }, []).filter).decision, "keep", "filter off");
+  assert.throws(() => P.loadConfig({ POLLER_HOME: dir, SKIP_CATEGORIES: "directions,sports" }, []), /unknown skip category sports/);
+  fs.writeFileSync(path.join(dir, "filter.json"), "{nope");
+  assert.throws(() => P.loadConfig({ POLLER_HOME: dir }, []), /not valid JSON/);
+  const cli = spawnSync(process.execPath, [path.join(here, "../poller.mjs"), "--filter-config"], { env: { ...process.env, POLLER_HOME: tmp(), SKIP_CATEGORIES: "weather" }, encoding: "utf8" });
+  assert.equal(cli.status, 0); assert.deepEqual(JSON.parse(cli.stdout).skip, ["weather"]);
+});
+
+test("filter in the loop: directions chat skipped (no model, no push, handled, id+category log); real and mixed chats posted", async () => {
+  const lines = [];
+  const log = (level, msg, f = {}) => lines.push(JSON.stringify({ level, msg, ...f }));
+  const t = await setup({ since: new Date(Date.now() - 2 * 3600_000).toISOString(), fixture: "filter-chats.json", log });
+  try {
+    const r = await t.poller.cycle();
+    assert.equal(r.ok, true);
+    assert.equal(r.counts.filtered, 3, "directions + weather + greetings-only");
+    const st = id => t.poller.state.conversations[id];
+    assert.equal(st(DIRECTIONS).status, "skipped_filtered"); assert.deepEqual([st(DIRECTIONS).filtered.category, st(DIRECTIONS).filtered.by], ["directions", "keywords"]);
+    assert.equal(st(WEATHER).filtered.category, "weather"); assert.equal(st(GREETING).filtered.category, "greeting");
+    assert.equal(t.inbox.puts.length, 2, "only the real topic and the mixed chat are posted");
+    assert.deepEqual(t.inbox.puts.map(p => p.name.split("-")[1]).sort(), [P.convKey(TOPIC), P.convKey(MIXED)].sort());
+    assert.equal(t.summarizer.calls.filter(c => c.op === "session").length, 2, "no model session for the skipped chats");
+    assert.equal(t.summarizer.calls.filter(c => c.op === "classify").length, 0, "real/mixed chats have enough content: no classifier call");
+    const mixed = t.summarizer.calls.filter(c => c.op === "new").find(c => /garage shelves/.test(c.transcript));
+    assert.ok(mixed, "the mixed chat is summarized");
+    assert.doesNotMatch(mixed.transcript, /Take me to the lumber yard|Navigating to/, "its directions turn and Grok's answer are left out of the note");
+    assert.match(mixed.transcript, /stud finder/);
+    // logged by hashed id + category only
+    const skipped = lines.filter(l => l.includes("skipped by filter")).map(l => JSON.parse(l));
+    assert.equal(skipped.length, 3);
+    assert.deepEqual(Object.keys(skipped[0]).sort(), ["by", "category", "conv", "level", "msg", "turns"]);
+    assert.ok(skipped.some(l => l.conv === P.convKey(DIRECTIONS) && l.category === "directions"));
+    const all = lines.join("\n").toLowerCase();
+    for (const bad of ["maple street", "hardware", "traffic", "umbrella", "good morning", DIRECTIONS]) assert.ok(!all.includes(bad.toLowerCase()), `leaked: ${bad}`);
+    // handled: not retried, not even reloaded
+    const loads = t.fake.stats.loadResponses;
+    t.inbox.processAll(); const r2 = await t.poller.cycle();
+    assert.equal(t.fake.stats.loadResponses, loads, "skipped chats are not loaded again"); assert.equal(r2.counts.filtered || 0, 0);
+    assert.equal(t.inbox.puts.length, 2);
+    // the directions chat continues with a real plan: only the NEW messages are filtered and summarized
+    await append(t, DIRECTIONS, [{ sender: "human", minAgo: 12, message: "Also, for the porch repaint I picked the sage green paint, two gallons, and I want it done before the 20th." },
+      { sender: "assistant", minAgo: 11.9, message: "Sage green, two gallons, porch done before the 20th." }]);
+    await t.poller.cycle();
+    assert.equal(t.inbox.puts.length, 3);
+    const porch = t.summarizer.calls.filter(c => c.op === "new").at(-1).transcript;
+    assert.match(porch, /porch repaint/); assert.doesNotMatch(porch, /navigate|traffic/i, "the throwaway part is not part of the note");
+  } finally { await t.fake.close(); }
+});
+
+test("filter stage 2: short gray-zone chat -> the model's {category, keep}; skip only for an enabled category, never 'topic'", async () => {
+  const run = async (classify, cfgExtra = {}) => {
+    const t = await setup({ since: new Date(Date.now() - 4 * 86400_000).toISOString(), summarizer: fakeSummarizer({ classify }), cfgExtra });
+    try { await t.poller.cycle(); return { t, st: t.poller.state.conversations[OLD] }; } finally { await t.fake.close(); }
+  };
+  // OLD = "Remind me to call the bakery about the cake order." (10 words: the model is asked)
+  let { t, st } = await run({ category: "lookup", keep: false });
+  assert.equal(st.status, "skipped_filtered"); assert.deepEqual([st.filtered.category, st.filtered.by], ["lookup", "model"]);
+  assert.ok(!t.inbox.puts.some(p => p.name.includes(P.convKey(OLD))));
+  const oldCalls = t.summarizer.calls.filter(c => c.op === "classify");
+  assert.equal(oldCalls.length, 1);
+  ({ t, st } = await run({ category: "topic", keep: false }));
+  assert.ok(t.inbox.puts.some(p => p.name.includes(P.convKey(OLD))), "category topic is always kept");
+  ({ t, st } = await run({ category: "lookup", keep: false }, { filter: { ...F.FILTER_DEFAULTS, skip: ["directions"] } }));
+  assert.ok(t.inbox.puts.some(p => p.name.includes(P.convKey(OLD))), "lookup not in the skip list -> kept");
+  ({ t, st } = await run({ category: "lookup", keep: false }, { filter: { ...F.FILTER_DEFAULTS, model: false } }));
+  assert.ok(t.inbox.puts.some(p => p.name.includes(P.convKey(OLD))), "model classifier off -> kept");
+  assert.equal(t.summarizer.calls.filter(c => c.op === "classify").length, 0);
+});
+
+test("filter: classify op uses a JSON schema {category enum, keep boolean}; malformed output is an error (nothing skipped)", async () => {
+  let s = scriptedChat([{ category: "directions", keep: false }]);
+  assert.deepEqual(await P.createModelOps(s.chat).classify("User: navigate home"), { category: "directions", keep: false });
+  assert.deepEqual(s.seen[0].schema.properties.category.enum, ["topic", "directions", "weather", "lookup", "timer", "media", "greeting"]);
+  assert.equal(s.seen[0].schema.properties.keep.type, "boolean");
+  assert.match(s.seen[0].system, /If ANY part of the chat is the user.s own plan/);
+  s = scriptedChat([{ category: "directions" }]);
+  await assert.rejects(P.createModelOps(s.chat).classify("x"), e => e.kind === "summarizer");
+  assert.equal(P.interpretClassification({ category: "weather", keep: true }, F.FILTER_DEFAULTS).keep, false, "the category decides (a 2B model says keep: true next to 'media')");
+  assert.equal(P.interpretClassification({ category: "topic", keep: false }, F.FILTER_DEFAULTS).keep, true);
+  assert.deepEqual(P.interpretClassification({ category: "weather", keep: false }, F.FILTER_DEFAULTS).category, "weather");
 });
 
 /* ---------- runner ---------- */

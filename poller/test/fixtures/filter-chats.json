@@ -1,0 +1,62 @@
+{
+  "_comment": "SYNTHETIC fixtures only (fictional places and plans) for the throwaway-chat filter. Times are minutes before the fake server's start.",
+  "conversations": [
+    {
+      "conversationId": "synthetic-voice-directions-0101",
+      "title": "Directions",
+      "mediaTypes": ["audio"],
+      "messages": [
+        { "sender": "human", "minAgo": 30, "message": "Hey Grok, navigate to the Maple Street hardware store." },
+        { "sender": "assistant", "minAgo": 29.9, "message": "Starting directions to Maple Street Hardware, about 12 minutes away. Take the next exit and turn left on Oak Avenue." },
+        { "sender": "human", "minAgo": 25, "message": "How's the traffic on the highway?" },
+        { "sender": "assistant", "minAgo": 24.9, "message": "Traffic is light, you should arrive at 4:10." },
+        { "sender": "human", "minAgo": 20, "message": "Okay thanks." }
+      ]
+    },
+    {
+      "conversationId": "synthetic-voice-topic-0102",
+      "title": "Birthday party",
+      "mediaTypes": ["audio"],
+      "messages": [
+        { "sender": "human", "minAgo": 40, "message": "Let's plan Nora's tenth birthday party. I'm thinking of doing it at the community pool on the 14th, with about twelve kids." },
+        { "sender": "assistant", "minAgo": 39.9, "message": "A pool party for twelve kids on the 14th sounds fun. Do you want to order a cake or bake one?" },
+        { "sender": "human", "minAgo": 35, "message": "Order a chocolate cake from the bakery downtown, and remind me to send the invitations by Friday." },
+        { "sender": "assistant", "minAgo": 34.9, "message": "Chocolate cake from the downtown bakery, invitations out by Friday. Noted." }
+      ]
+    },
+    {
+      "conversationId": "synthetic-voice-mixed-0103",
+      "title": "Drive and shelves",
+      "mediaTypes": ["audio"],
+      "messages": [
+        { "sender": "human", "minAgo": 50, "message": "Take me to the lumber yard on Route 9." },
+        { "sender": "assistant", "minAgo": 49.9, "message": "Navigating to the lumber yard on Route 9, 18 minutes." },
+        { "sender": "human", "minAgo": 45, "message": "While I drive, help me plan the garage shelves. I want three shelves on the left wall, sixteen inches deep, made from 2x4s and plywood." },
+        { "sender": "assistant", "minAgo": 44.9, "message": "Three shelves on the left wall, 16 inches deep, 2x4 frame with plywood tops. You'll need about eight 2x4s and two sheets of plywood." },
+        { "sender": "human", "minAgo": 40, "message": "Great, add brackets and a box of screws to the shopping list, and I'll borrow Sam's stud finder." },
+        { "sender": "assistant", "minAgo": 39.9, "message": "Added brackets and screws; borrowing Sam's stud finder." }
+      ]
+    },
+    {
+      "conversationId": "synthetic-voice-weather-0104",
+      "title": "Weather",
+      "mediaTypes": ["audio"],
+      "messages": [
+        { "sender": "human", "minAgo": 22, "message": "What's the weather tomorrow?" },
+        { "sender": "assistant", "minAgo": 21.9, "message": "Tomorrow will be sunny with a high of 68." },
+        { "sender": "human", "minAgo": 21, "message": "Do I need an umbrella?" },
+        { "sender": "assistant", "minAgo": 20.9, "message": "No umbrella needed." }
+      ]
+    },
+    {
+      "conversationId": "synthetic-voice-greeting-0105",
+      "title": "Hello",
+      "mediaTypes": ["audio"],
+      "messages": [
+        { "sender": "human", "minAgo": 26, "message": "Hey Grok, good morning! How are you?" },
+        { "sender": "assistant", "minAgo": 25.9, "message": "Good morning! I'm doing great, how can I help you today?" },
+        { "sender": "human", "minAgo": 25, "message": "Nothing, thanks. Bye!" }
+      ]
+    }
+  ]
+}
