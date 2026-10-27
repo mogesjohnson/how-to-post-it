@@ -76,18 +76,28 @@ A (manual export) and D (Ara, untested).
 - [x] **Key unknown, phone voice chat:** the full text of both sides is readable through `load-responses` from a
       signed-in browser (Oct 11, 2026). One archiver had reported voice conversations expose only metadata; the test
       shows otherwise.
-- [ ] **Still to confirm:** the same fetch from the script itself (not a browser), and a conversation started **in the
-      car** (expected to look the same).
-- [ ] **C1. REST reads (primary):** on an always-on machine, extract your grok.com session cookies and store them
-      **only** there (file with `600` perms, OS keychain, or an encrypted secret) — **never** in this repo, an inbox
-      file, or chat (a cookie is full account access). Poll the list every 1–2 min, load bodies only when a conversation changed, read-only, your own account only, honour 429s.
+- [x] **Non-browser client:** the poller (the script itself, not a browser) reads the list with plain `fetch` (reported live
+      since Oct 11, 2026; [issue #2](https://github.com/mogesjohnson/how-to-post-it/issues/2#issuecomment-6118062772)
+      closed Oct 12).
+- [ ] **Still to confirm** ([issue #10](https://github.com/mogesjohnson/how-to-post-it/issues/10)): a conversation
+      started **in the car** (expected to look the same), how long the session cookie lasts, and rate limits.
+- [x] **C1. REST reads (primary):** built into the poller (`READER=rest`), which reads the cookie from
+      `~/.post-it-poller/env` (`chmod 600`; it refuses a group- or other-readable file). Keep the cookie **only** on the always-on
+      machine — **never** in this repo, an inbox file, or chat (a cookie is full account access). Poll the list every 1–2 min, load bodies only when a conversation changed, read-only, your own account only, honour 429s.
 - [ ] **C2. Browser automation (fallback):** a persistent browser profile logged in as you, for when C1 is challenged
       or its cookie expires. Guard the whole profile directory like a password. Do **not** use "anti-bot bypass".
+      Not built: `READER=browser` is a stub in the poller. Build it only if the REST reader gets challenged.
 - [ ] **A. Official API or export:** check grok.com → Settings → Data Controls and xAI's docs for anything newer than
       the manual account-data ZIP (good only for a manual backfill).
 - [ ] **B. Grok Automation:** test whether a scheduled Automation can list your other conversations and push a file to
       GitHub; if so, use it as a daily catch-up.
 - [ ] **D. Ara posts it:** needs no reader, but is untested (step 6).
+
+**✅ Items 1–3 below done (2026-10-11/12):** the poller in [`poller/`](../poller/README.md) is the loop, with a
+`--dry-run` mode, run in the background by `poller/start.sh` on the always-on box, and a health check
+(`poller/start.sh status`) ([issue #4](https://github.com/mogesjohnson/how-to-post-it/issues/4), closed). Still
+open ([issue #10](https://github.com/mogesjohnson/how-to-post-it/issues/10)): nothing sends an alert on a stale
+heartbeat yet, so check `poller/start.sh status` by hand.
 
 Then:
 
@@ -106,7 +116,8 @@ Then:
 **✅ Items 1–2 done (2026-10-06):** a live run pushed 14 test commands and 3 cleanup deletes through the inbox
 (add, typo and duplicate matching, edit, rename, delete, invalid input). All 17 workflow runs succeeded with the
 expected results, and the board was left exactly as it was before the test. Use items 1–2 again to re-check the inbox
-after any change to it. Item 3 waits for the transcript automation.
+after any change to it. Item 3 still needs a car drive: the poller is built, but no car-originated conversation has
+been checked yet ([issue #10](https://github.com/mogesjohnson/how-to-post-it/issues/10)).
 
 1. From a computer with `gh` signed in: `scripts/send-test-command.sh`. It pushes a clearly named test note and
    prints the result. **This writes to the live board.**
