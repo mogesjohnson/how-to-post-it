@@ -23,13 +23,13 @@ The goal was simple to state: **save a short summary of each car conversation to
 
 This path has been built and tested end to end. The writer only needs permission to push a file. It never sees the Supabase login. The workflow now fails visibly (a red run in GitHub Actions) if it can't push the result back, instead of passing silently.
 
-> Note: the inbox branch lives in **post-it-board**, not in this how-to-post-it repo. This repo holds only documentation.
+> Note: the inbox branch lives in **post-it-board**, not in this how-to-post-it repo. This repo holds the documentation and the transcript poller ([`poller/`](../poller/README.md)), with no secrets.
 
 ## 3. The primary plan: transcript automation
 
 The Grok app on the phone **mirrors car conversations** into its chat history, with timestamps. So we don't need anything clever in the car. A script can watch that history from outside.
 
-Here's how it's meant to work:
+Here's how it works. The script is built: it's the poller in [`poller/`](../poller/README.md) (section 5).
 
 1. A small script runs on an **always-on machine** that Moges controls.
 2. It reads his grok.com conversation history with the same web requests grok.com's own page makes. These are `GET grok.com/rest/app-chat/conversations` to list conversations, and `POST grok.com/rest/app-chat/conversations/{id}/load-responses` to get the messages. It authenticates with his grok.com **session cookie**, which is stored only on that machine.
@@ -56,9 +56,9 @@ If the REST reads don't work, for example if they return only titles and no text
 
 This is documentation only for now. Nobody should build it unless the primary plan has been tested and has failed. One open question remains: if the transcript can't be read at all, the fallback still needs another way to get the text to paste in.
 
-## 5. Building it (issue #4)
+## 5. Building it (issue #4, done)
 
-The actual build is tracked in [issue #4](https://github.com/mogesjohnson/how-to-post-it/issues/4). It covers the transcript reader, the silence loop, the summarizer, the inbox push, and a health check that alerts when sign-in or the data format breaks. The REST test it waited on passed (section 6), so it can start.
+The build was tracked in [issue #4](https://github.com/mogesjohnson/how-to-post-it/issues/4): the transcript reader, the silence loop, the summarizer, the inbox push, and a health check that reports when sign-in or the data format breaks. It's built. The poller in [`poller/`](../poller/README.md) is a dependency-free Node 18+ script (`poller.mjs`), started and stopped in the background by `start.sh`, with tests that use only synthetic chats. Issue #4 was closed on Oct 12, 2026, with the poller reported running live on the always-on box ([closing comment](https://github.com/mogesjohnson/how-to-post-it/issues/4#issuecomment-6118063176)). Build results are in [transcript-automation.md](transcript-automation.md) §2.7–2.10. Leftover nice-to-haves are tracked in [issue #10](https://github.com/mogesjohnson/how-to-post-it/issues/10).
 
 ## 6. What the test showed, and what's still untested
 
@@ -67,13 +67,15 @@ The REST read was tested on Oct 11, 2026 ([issue #2 results](https://github.com/
 - **REST reads: verified.** For a **phone voice chat**, `load-responses` returned the **full text of both sides**, not just metadata. The chat was there within about 2 minutes of ending. Voice chats are marked `mediaTypes: ["audio"]`; nothing marks a chat as coming from the car.
 - **Timestamps: precise, but they mark the start of a turn.** They're UTC to the millisecond (only in the API, not in the app). Ara's replies are stamped within about 2 seconds of the question, i.e. when she *starts* talking. A seconds-long threshold would cut her off mid-answer, so the threshold is now **10 minutes**.
 
-Still untested: a non-browser client (the script itself), a conversation started **in the car** (expected to look the same), how long the session cookie lasts, and rate limits. Issue #2 stays open until the script reproduces the fetch.
+Since then, **a non-browser client works too.** The poller reads the conversation list with plain `fetch` and the session cookie, outside any browser. When issue #2 was closed on Oct 12, 2026 ([summary](https://github.com/mogesjohnson/how-to-post-it/issues/2#issuecomment-6118062772)), the owner reported it polling live every 90 seconds since Oct 11, 2026, 10:04 PM ET, with 100+ successful list reads and no sign-in failures, challenge pages or rate-limit errors.
+
+Still untested, and tracked in [issue #10](https://github.com/mogesjohnson/how-to-post-it/issues/10): a conversation started **in the car** (expected to look the same), how long the session cookie lasts, and rate limits.
 
 ## 7. What Moges still does by hand
 
 - **Change the Supabase owner password.** It showed up in tool logs during setup. This comes first.
 - **Create a limited GitHub token** that can only write to the post-it-board repo, for the script's inbox pushes.
-- **Pick the always-on machine** the script will run on.
+- ~~**Pick the always-on machine** the script will run on.~~ Done: the poller runs on the always-on box (section 5).
 - **Accept, or decline, the terms-of-service risk.** The REST calls are private, undocumented grok.com endpoints. xAI's terms and acceptable-use policy are quoted in [transcript-automation.md](transcript-automation.md) so this can be an informed choice.
 - After a few real drives, **tune `QUIET_MINUTES`** (default 10).
 
