@@ -17,7 +17,7 @@ the machine that runs it.
 | [docs/architecture.md](docs/architecture.md) | Diagrams of all write paths, who does what, failure modes |
 | [docs/setup-checklist.md](docs/setup-checklist.md) | The steps you do by hand |
 | [docs/risks.md](docs/risks.md) | Honest risks and the list of unverified assumptions |
-| [poller/](poller/README.md) | **The transcript poller:** reads Grok voice chats (REST), detects quiet, summarizes with a local model, pushes to the inbox. Setup, tests, health check |
+| [poller/](poller/README.md) | **The transcript poller:** reads Grok voice chats (REST), detects quiet, queues finished chats for the assistant to summarize twice a day, pushes to the inbox. Setup, tests, health check |
 | [templates/](templates/) | Example command files (add / edit / delete), all for the test pin `how-to-post-it test` |
 | [scripts/send-test-command.sh](scripts/send-test-command.sh) | Pushes a test command into the board's inbox with `gh` |
 | [docs/ai-studio-prompt.md](docs/ai-studio-prompt.md) | *Superseded, optional legacy:* prompt for the old Android voice app |
