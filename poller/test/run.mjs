@@ -9,6 +9,7 @@ import * as P0 from "../poller.mjs";
 import * as F from "../filter.mjs";
 const P = { ...P0, ...F };
 import { startFakeGrok } from "./fake-grok.mjs";
+import { buildCommand } from "../post-summary.mjs";
 
 const here = path.dirname(fileURLToPath(import.meta.url));
 const tests = [];
@@ -83,15 +84,16 @@ function memInbox(board) {
     processAll() { for (const n of [...files.keys()]) this.process(n); },
   };
 }
-async function setup({ since, summarizer = fakeSummarizer(), mode = "ok", topics = [], cfgExtra = {}, fixture, log } = {}) {
+async function setup({ since, summarizer = fakeSummarizer(), mode = "ok", topics = [], cfgExtra = {}, fixture, log, queue = false } = {}) {
   const fake = await startFakeGrok({ mode, ...(fixture ? { fixture: path.join(here, "fixtures", fixture) } : {}) });
   const dir = tmp();
   const cfg = cfgFor(dir, { ...(since ? { since } : {}), ...cfgExtra });
   const reader = P.createRestReader({ baseUrl: fake.url, cookie: "sso=synthetic; sso-rw=synthetic" });
   const board = fakeBoard(topics);
   const inbox = memInbox(board);
-  const poller = P.createPoller({ cfg, reader, summarizer, inbox, board, ...(log ? { log } : {}) });
-  return { fake, dir, cfg, reader, inbox, poller, summarizer, board };
+  const queueDir = queue ? path.join(dir, "queue") : null;
+  const poller = P.createPoller({ cfg, reader, summarizer, inbox, board, queueDir, ...(log ? { log } : {}) });
+  return { queueDir, fake, dir, cfg, reader, inbox, poller, summarizer, board };
 }
 const HOUR_AGO = () => new Date(Date.now() - 3600_000).toISOString();
 const append = (t, conversationId, messages) => fetch(`${t.fake.url}/__admin/append`, { method: "POST", body: JSON.stringify({ conversationId, messages }) });
@@ -917,6 +919,43 @@ test("filter: classify op uses a JSON schema {category enum, keep boolean}; malf
   assert.equal(P.interpretClassification({ category: "weather", keep: true }, F.FILTER_DEFAULTS).keep, false, "the category decides (a 2B model says keep: true next to 'media')");
   assert.equal(P.interpretClassification({ category: "topic", keep: false }, F.FILTER_DEFAULTS).keep, true);
   assert.deepEqual(P.interpretClassification({ category: "weather", keep: false }, F.FILTER_DEFAULTS).category, "weather");
+});
+
+/* ---------- queue mode (no local model) ---------- */
+test("queue: a finished chat is written to <queueDir>/<chatId>.json once, no model, nothing pushed; resume overwrites it", async () => {
+  const t = await setup({ since: HOUR_AGO(), queue: true, summarizer: null });
+  try {
+    await t.poller.cycle();
+    const f = path.join(t.queueDir, `${QUIET}.json`);
+    const e = JSON.parse(fs.readFileSync(f, "utf8"));
+    assert.equal(e.chatId, QUIET); assert.equal(e.resume, false); assert.match(e.transcript, /^User: /);
+    assert.equal(fs.statSync(f).mode & 0o777, 0o600);
+    assert.equal(t.inbox.puts.length, 0); assert.equal(t.poller.state.conversations[QUIET].status, "queued");
+    const loads = t.fake.stats.loadResponses; fs.unlinkSync(f);
+    await t.poller.cycle();
+    assert.ok(!fs.existsSync(f), "not re-queued"); assert.equal(t.fake.stats.loadResponses, loads, "unchanged: no reload");
+    // the assistant posted it: post-summary.mjs leaves a posted record
+    P.writeJsonAtomic(path.join(t.cfg.home, "posted", `${QUIET}.json`), { board: { date: e.boardDate, pinTitle: "Garden bed", pageNumber: 1 }, lastTs: e.lastMessageTime });
+    await t.poller.cycle();
+    assert.equal(t.poller.state.conversations[QUIET].status, "posted");
+    await append(t, QUIET, [{ sender: "human", minAgo: 12, message: "Add marigolds along the edge of the bed." }, { sender: "assistant", minAgo: 11.9, message: "Marigolds along the edge, noted." }]);
+    await t.poller.cycle();
+    const e2 = JSON.parse(fs.readFileSync(f, "utf8"));
+    assert.equal(e2.resume, true); assert.equal(e2.board.pinTitle, "Garden bed");
+    assert.match(e2.transcript, /marigolds/i); assert.doesNotMatch(e2.transcript, /four feet by eight/, "only the new messages");
+  } finally { await t.fake.close(); }
+});
+
+test("post-summary: resume edits the same pin; a matching topic name edits it; otherwise add on the chat's day; cap enforced", () => {
+  const cfg = cfgFor(tmp());
+  const topics = [{ pinTitle: "Garden bed", date: "2026-10-05", page1: { body: "x" } }, { pinTitle: "Post-it Board", date: "2026-10-01", page1: { body: "w" } }];
+  const entry = { boardDate: "2026-11-07", board: null };
+  assert.equal(buildCommand({ ...entry, board: { date: "2026-10-05", pinTitle: "Garden bed", pageNumber: 1 } }, topics, { topic: "", body: "b", cfg }).cmd.op, "edit");
+  assert.deepEqual(buildCommand(entry, topics, { topic: "garden BED", body: "b", cfg }).cmd, { op: "edit", target: "page", date: "2026-10-05", pin: "Garden bed", pageNumber: 1, body: "b" });
+  assert.deepEqual(buildCommand(entry, topics, { topic: "Post-it Board", body: "b", cfg }).cmd.date, "2026-11-07", "excluded topic is never edited");
+  assert.equal(buildCommand(entry, topics, { topic: "Bikes", body: "b", cfg }).cmd.op, "add");
+  assert.throws(() => buildCommand(entry, topics, { topic: "Bikes", body: "a".repeat(1501), cfg }), /cap/);
+  assert.throws(() => buildCommand(entry, topics, { topic: "", body: "b", cfg }), /--topic/);
 });
 
 /* ---------- runner ---------- */

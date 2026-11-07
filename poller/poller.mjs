@@ -2,10 +2,10 @@
 // Post-it transcript poller (issue #4). Node 18+, no dependencies (built-in fetch).
 //
 // Watches recent Grok voice conversations (REST, read-only), waits until one has been quiet for
-// QUIET_MINUTES, then files it into a TOPIC PAPER on mogesjohnson/post-it-board: one pin per topic whose
-// page 1 is a living summary (<= 1,500 characters). The local llama.cpp model decides whether the chat
-// matches an existing topic (read from the board's public, read-only Supabase API) and merges it in
-// (`edit` of page 1), or starts a NEW topic (`add`). Commands go to the board's `inbox` branch.
+// QUIET_MINUTES, then writes it to poller/queue/<chatId>.json (gitignored). The assistant summarizes the queue
+// twice a day and posts each note with poller/post-summary.mjs: one pin per topic whose page 1 is a living
+// summary (<= 1,500 characters), `add` for a new topic, `edit` of page 1 when the chat resumes. Commands go to
+// the board's `inbox` branch. (The local llama.cpp model code is kept only for --compact / --summarize-file.)
 // Design: docs/transcript-automation.md. Usage: poller/README.md.
 //
 //   node poller/poller.mjs                 # run the loop (normally via poller/start.sh)
@@ -77,6 +77,7 @@ export function loadConfig(env = process.env, argv = []) {
   };
   if (cfg.pollSeconds < 60 && !env.POLL_SECONDS_ALLOW_FAST) cfg.pollSeconds = 60; // be gentle with grok.com
   if (cfg.pollSeconds > 120 && !env.POLL_SECONDS_ALLOW_SLOW) cfg.pollSeconds = 120;
+  cfg.queueDir = env.POLLER_QUEUE_DIR || path.join(path.dirname(fileURLToPath(import.meta.url)), "queue");
   cfg.stateDir = cfg.dryRun ? path.join(home, "dry-run") : home;
   return cfg;
 }
@@ -127,7 +128,7 @@ export function makeLogger(file, { echo = true } = {}) {
   };
 }
 
-function writeJsonAtomic(file, obj, mode) {
+export function writeJsonAtomic(file, obj, mode) {
   fs.mkdirSync(path.dirname(file), { recursive: true });
   const tmp = `${file}.${process.pid}.tmp`;
   fs.writeFileSync(tmp, JSON.stringify(obj, null, 2) + "\n", mode ? { mode } : undefined);
@@ -212,7 +213,7 @@ export function validateList(data) {
       throw new PollerError("schema", `list: conversation[${i}] lacks conversationId/createTime/modifyTime`);
     }
     if (c.mediaTypes !== undefined && !Array.isArray(c.mediaTypes)) throw new PollerError("schema", `list: conversation[${i}].mediaTypes is not an array`);
-    return { id: c.conversationId, createTime: c.createTime, modifyTime: c.modifyTime, mediaTypes: c.mediaTypes || [] };
+    return { id: c.conversationId, title: typeof c.title === "string" ? c.title : null, createTime: c.createTime, modifyTime: c.modifyTime, mediaTypes: c.mediaTypes || [] };
   });
 }
 
@@ -956,7 +957,34 @@ export function editTopicCommand(topic, body) {
 /* ------------------------------------------------------------------ */
 /* the poller                                                          */
 /* ------------------------------------------------------------------ */
-export function createPoller({ cfg, reader, summarizer, inbox, board, log = () => {}, now = Date.now, statePath, healthPath }) {
+/* ------------------------------------------------------------------ */
+/* queue: finished chats wait here for the assistant's summary          */
+/* ------------------------------------------------------------------ */
+// <queueDir>/<chatId>.json holds chat text: gitignored, chmod 600, never logged. post-summary.mjs pushes the note and
+// writes <home>/posted/<chatId>.json ({board, lastTs}); the loop folds that into its state on the next poll.
+export const safeId = id => String(id).replace(/[^A-Za-z0-9_-]/g, "_");
+export function queueEntry({ conv, st, todo, newMsgs, last, pf, nowMs }) {
+  const resume = !!st.board;
+  return {
+    version: 1, chatId: conv.id, convKey: st.convKey, title: conv.title ?? null,
+    createTime: conv.createTime, modifyTime: conv.modifyTime, firstMessageTime: todo[0].createTime, lastMessageTime: last.createTime,
+    boardDate: nyDate(todo[0].createTime), queuedAt: new Date(nowMs).toISOString(),
+    resume, board: st.board || null, filterHint: pf.decision === "ask" ? "little real content: maybe a throwaway chat" : null,
+    // after a post, only the new messages go into the note
+    transcript: formatTranscript(resume || st.filtered ? newMsgs : todo),
+  };
+}
+export function applyPostedRecord(home, id, st, log = () => {}) {
+  const f = path.join(home, "posted", `${safeId(id)}.json`);
+  const r = loadState(f);
+  if (!r) return false;
+  st.board = r.board || st.board; st.lastPostedMsgTime = r.lastTs; st.status = "posted"; st.queued = null;
+  log("info", "posted by assistant", { conv: st.convKey });
+  try { fs.unlinkSync(f); } catch {}
+  return true;
+}
+
+export function createPoller({ cfg, reader, summarizer, inbox, board, log = () => {}, now = Date.now, statePath, healthPath, queueDir = null }) {
   statePath ??= path.join(cfg.stateDir, "state.json");
   healthPath ??= path.join(cfg.stateDir, "health.json");
   const modelLock = path.join(cfg.home, "model.lock");
@@ -1067,6 +1095,8 @@ export function createPoller({ cfg, reader, summarizer, inbox, board, log = () =
   async function handle(conv, nowMs) {
     const st = state.conversations[conv.id] ??= { convKey: convKey(conv.id), status: "active", retry: 0, lastPostedMsgTime: null, board: null };
     if (st.pending) { await checkPending(conv.id, st); if (st.pending) return "pending"; }
+    if (queueDir && applyPostedRecord(cfg.home, conv.id, st, log)) save();
+    if (queueDir && st.queued && st.status === "queued" && st.lastLoadedModify === conv.modifyTime) return "queued"; // unchanged: no reload
     if (st.status === "opted_out" && st.lastLoadedModify === conv.modifyTime) return "opted_out";
 
     const modifyMs = ms(conv.modifyTime);
@@ -1105,6 +1135,17 @@ export function createPoller({ cfg, reader, summarizer, inbox, board, log = () =
     // throwaway filter, stage 1 (keywords, no model): directions / weather / lookups / timers / music / greetings
     const pf = prefilter(newMsgs, cfg.filter);
     if (pf.decision === "skip") return markFiltered(st, last, pf.category, "keywords", pf.turns);
+
+    if (queueDir) { // no local model: queue the chat for the assistant's twice-daily summary run
+      if (st.queued?.lastTs === last.createTime) return "queued";
+      const clean = pf.turns.throwaway ? x => stripThrowaway(x, cfg.filter) : x => x;
+      const entry = queueEntry({ conv, st, todo: clean(todo), newMsgs: clean(newMsgs), last, pf, nowMs });
+      fs.mkdirSync(queueDir, { recursive: true, mode: 0o700 });
+      writeJsonAtomic(path.join(queueDir, `${safeId(conv.id)}.json`), entry, 0o600); // a resumed chat overwrites its file
+      st.queued = { lastTs: last.createTime, at: entry.queuedAt }; st.status = "queued"; save();
+      log("info", "queued", { conv: st.convKey, messages: todo.length, newMessages: newMsgs.length, resume: entry.resume });
+      return "queued";
+    }
 
     // one llama-server user at a time: if --compact holds the model, try again next poll
     const release = tryLock(modelLock);
@@ -1333,7 +1374,7 @@ async function main(argv) {
 
   if (a["filter-config"]) { console.log(JSON.stringify(cfg.filter, null, 2)); return; }
 
-  if (a["summarize-file"]) {
+  if (a["summarize-file"]) { // legacy local-model check; the loop no longer uses the model
     const text = fs.readFileSync(a["summarize-file"], "utf8");
     const { summary, stats } = await createLlamaSummarizer(cfg, () => {}).summarize(text);
     console.log(JSON.stringify({ summary, stats, schemaValid: validateSummary(summary) === null }, null, 2));
@@ -1377,7 +1418,7 @@ async function main(argv) {
   }
   const reader = cfg.reader === "browser" ? createBrowserReader()
     : createRestReader({ baseUrl: cfg.grokBase, cookie: process.env.GROK_COOKIE, pageSize: cfg.pageSize });
-  const poller = createPoller({ cfg, reader, summarizer: createLlamaSummarizer(cfg, log), inbox: makeInbox(), board: createBoardReader(), log });
+  const poller = createPoller({ cfg, reader, summarizer: null, inbox: makeInbox(), board: createBoardReader(), log, queueDir: cfg.queueDir });
   log("info", "start", { filter: { skip: cfg.filter.skip, model: cfg.filter.model, source: cfg.filter.source }, reader: reader.kind, quietMinutes: cfg.quietMinutes, pollSeconds: cfg.pollSeconds, dryRun: cfg.dryRun, since: poller.state.since, repo: cfg.repo, branch: cfg.branch });
 
   for (;;) {

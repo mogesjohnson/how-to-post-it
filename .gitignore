@@ -26,3 +26,6 @@ output.json
 *.iml
 .vscode/
 .DS_Store
+
+# Poller queue: holds chat text, never commit
+poller/queue/

@@ -2,8 +2,30 @@
 
 The implementation of [issue #4](https://github.com/mogesjohnson/how-to-post-it/issues/4) and
 [docs/transcript-automation.md](../docs/transcript-automation.md): it notices when a Grok **voice** conversation has
-gone quiet, summarizes it with a **local** model, and pushes one command file to the `inbox` branch of
-[mogesjohnson/post-it-board](https://github.com/mogesjohnson/post-it-board/tree/inbox).
+gone quiet and **queues** it in `poller/queue/<chatId>.json`. Twice a day (morning and evening) the assistant reads
+the queue, writes each summary, and posts it with `post-summary.mjs`, which pushes one command file to the `inbox`
+branch of [mogesjohnson/post-it-board](https://github.com/mogesjohnson/post-it-board/tree/inbox). The loop no longer
+runs a local model (the Qwen3.5-2B code below is kept only for `--compact` and `--summarize-file`).
+
+### Queue (`poller/queue/`, gitignored, chmod 600: it holds chat text)
+
+One file per finished chat, `<chatId>.json`: `{version, chatId, convKey, title, createTime, modifyTime,
+firstMessageTime, lastMessageTime, boardDate, queuedAt, resume, board, filterHint, transcript}`. `resume: true` and
+`board` (`date`, `pinTitle`, `pageNumber`) mean the chat was posted before and continued; `transcript` then holds only
+the new messages, and the same file is overwritten if it resumes again before it is posted. A queued chat is not
+queued again unless new messages arrive. The keyword throwaway filter still skips obvious throwaway chats;
+`filterHint` flags short ones for the assistant to judge.
+
+```bash
+node poller/post-summary.mjs --list                                        # what is queued (no chat text)
+node poller/post-summary.mjs <chatId> --topic "Pin title" --summary-file note.txt   # or --summary "text"
+node poller/post-summary.mjs <chatId> --skip                               # throwaway: post nothing
+```
+
+A resumed chat edits page 1 of its pin (write the merged summary); a `--topic` equal to an existing pin title edits
+that pin's page 1; anything else adds a new pin on `boardDate`. The body must be ≤ 1,500 characters. It waits for the
+inbox result (up to 5 min), then deletes the queue file and leaves `~/.post-it-poller/posted/<chatId>.json`, which the
+loop folds into `state.json` on its next poll. `--dry-run` prints the command without pushing.
 
 **Topic papers:** one pin = one topic, and that pin's **page 1 is one living summary** of the topic (at most
 **1,500 characters**). A finished chat about a topic that is already on the board is **merged** into that summary
@@ -38,11 +60,11 @@ Every `POLL_SECONDS` (default 90, clamped to 60–120):
    came after Ara's "Posted." if you said "post it" during the drive.
 6. **Throwaway filter** ([below](#throwaway-chat-filter)): skip directions, weather, quick lookups, timers, music and
    greetings-only / very short chats before anything is summarized.
-7. **Match or NEW** (below): read the board's topics, ask the local model whether the chat belongs to one of them.
-8. **Matched** → merge the current summary with the new chat → `edit` page 1 of that pin. **NEW** → summarize →
-   `add` a new pin with page 1 "Summary".
-9. Push the command (exactly the fields `post.mjs --command-file` accepts) *push-if-absent* with the GitHub contents
-   API; then read `inbox/results/<name>` on later polls and record the status.
+7. Write the chat to the [queue](#queue-pollerqueue-gitignored-chmod-600-it-holds-chat-text) and mark it `queued`.
+8. The assistant summarizes it later and posts it with `post-summary.mjs` (matched or resumed → `edit` page 1 of that
+   pin, new → `add` a pin with page 1 "Summary"), push-if-absent with the GitHub contents API.
+
+The match / merge / summarizer sections below describe the earlier local-model loop, still used by `--compact`.
 
 ### Throwaway-chat filter
 
